@@ -23,6 +23,7 @@ interface DeliveryOrden {
   tipo_entrega: 'domicilio' | 'recoger' | null
   notas: string | null
   numero_diario: number | null
+  usuario_id: string | null
   orden_items: DeliveryItem[]
 }
 
@@ -30,10 +31,45 @@ interface Props {
   cajero: CajeroActivo
 }
 
+// ── Expo Push Notifications ───────────────────────────────────────────────────
+async function enviarNotificacionPush(
+  usuarioId: string | null,
+  titulo: string,
+  cuerpo: string,
+  datos?: Record<string, string>,
+) {
+  if (!usuarioId) return
+  try {
+    const { data } = await supabase
+      .from('usuarios')
+      .select('push_token')
+      .eq('id', usuarioId)
+      .single()
+    const token = data?.push_token
+    if (!token || !token.startsWith('ExponentPushToken')) return
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        to: token,
+        title: titulo,
+        body: cuerpo,
+        sound: 'default',
+        data: { screen: 'Ordenar', ...datos },
+        channelId: 'default',
+      }),
+    })
+  } catch {
+    /* silencioso — no bloquear el flujo del POS */
+  }
+}
+
+// ─── Componente ────────────────────────────────────────────────────────────────
 export default function DeliveryAlerts({ cajero }: Props) {
   const [pendientes, setPendientes] = useState<DeliveryOrden[]>([])
-  const [detalle, setDetalle] = useState<DeliveryOrden | null>(null)
-  const [showPanel, setShowPanel] = useState(false)
+  const [activas, setActivas]       = useState<DeliveryOrden[]>([])
+  const [detalle, setDetalle]       = useState<DeliveryOrden | null>(null)
+  const [showPanel, setShowPanel]   = useState(false)
   const [procesando, setProcesando] = useState(false)
   const prevCount = useRef(0)
 
@@ -58,17 +94,17 @@ export default function DeliveryAlerts({ cajero }: Props) {
   }, [pendientes.length])
 
   async function cargar() {
-    const { data } = await supabase
-      .from('ordenes')
-      .select(`
-        id, created_at, mesa_nombre, cliente_nombre, cliente_telefono,
-        direccion_entrega, tipo_entrega, notas, numero_diario,
-        orden_items(id, nombre, emoji, cantidad, precio, notas)
-      `)
-      .eq('canal', 'delivery')
-      .eq('estado', 'pendiente')
-      .order('created_at', { ascending: true })
-    setPendientes((data as DeliveryOrden[]) ?? [])
+    const campos = `
+      id, created_at, mesa_nombre, cliente_nombre, cliente_telefono,
+      direccion_entrega, tipo_entrega, notas, numero_diario, usuario_id,
+      orden_items(id, nombre, emoji, cantidad, precio, notas)
+    `
+    const [pendRes, activaRes] = await Promise.all([
+      supabase.from('ordenes').select(campos).eq('canal', 'delivery').eq('estado', 'pendiente').order('created_at', { ascending: true }),
+      supabase.from('ordenes').select(campos).eq('canal', 'delivery').eq('estado', 'abierta').order('created_at', { ascending: true }),
+    ])
+    setPendientes((pendRes.data as DeliveryOrden[]) ?? [])
+    setActivas((activaRes.data as DeliveryOrden[]) ?? [])
   }
 
   function sonarAlertas() {
@@ -129,6 +165,15 @@ export default function DeliveryAlerts({ cajero }: Props) {
       }
 
       toast.success(`✅ Orden de ${orden.cliente_nombre} aceptada · comanda impresa`)
+
+      // Notificación push al cliente
+      const ref = orden.numero_diario ? `#${orden.numero_diario}` : ''
+      enviarNotificacionPush(
+        orden.usuario_id,
+        '¡Pedido aceptado! ☕',
+        `Tu pedido ${ref} está siendo preparado. Te avisamos cuando esté listo.`,
+      )
+
       setDetalle(null)
       cargar()
     } catch (err: any) {
@@ -143,10 +188,43 @@ export default function DeliveryAlerts({ cajero }: Props) {
     try {
       await supabase.from('ordenes').update({ estado: 'cancelada' }).eq('id', orden.id)
       toast('Pedido rechazado', { icon: '❌' })
+
+      // Notificación push al cliente
+      const ref = orden.numero_diario ? `#${orden.numero_diario}` : ''
+      enviarNotificacionPush(
+        orden.usuario_id,
+        'Pedido cancelado ❌',
+        `Tu pedido ${ref} fue cancelado. Contáctanos para más información.`,
+      )
+
       setDetalle(null)
       cargar()
     } catch {
       toast.error('Error al rechazar')
+    } finally {
+      setProcesando(false)
+    }
+  }
+
+  async function marcarEnCamino(orden: DeliveryOrden) {
+    setProcesando(true)
+    try {
+      await supabase.from('ordenes').update({ estado: 'pagada' }).eq('id', orden.id)
+      toast.success(`🛵 Orden de ${orden.cliente_nombre} marcada en camino`)
+
+      // Notificación push al cliente
+      const ref = orden.numero_diario ? `#${orden.numero_diario}` : ''
+      enviarNotificacionPush(
+        orden.usuario_id,
+        orden.tipo_entrega === 'domicilio' ? '¡Tu pedido va en camino! 🛵' : '¡Tu pedido está listo! 🏪',
+        orden.tipo_entrega === 'domicilio'
+          ? `Tu pedido ${ref} está en camino. ¡Prepárate para recibirlo!`
+          : `Tu pedido ${ref} está listo. Pasa a recogerlo en el café.`,
+      )
+
+      cargar()
+    } catch {
+      toast.error('Error al actualizar')
     } finally {
       setProcesando(false)
     }
@@ -181,25 +259,29 @@ export default function DeliveryAlerts({ cajero }: Props) {
     window.open(`https://wa.me/52${tel}?text=${msg}`, '_blank', 'noopener,noreferrer')
   }
 
-  if (pendientes.length === 0) return null
+  if (pendientes.length === 0 && activas.length === 0) return null
+
+  const totalBadge = pendientes.length + activas.length
 
   return (
     <>
       {/* ── Badge flotante ──────────────────────────────────────── */}
       <button
         onClick={() => setShowPanel(true)}
-        title={`${pendientes.length} pedido${pendientes.length !== 1 ? 's' : ''} delivery pendiente${pendientes.length !== 1 ? 's' : ''}`}
+        title={`${totalBadge} pedido${totalBadge !== 1 ? 's' : ''} delivery`}
         style={{
           position: 'fixed', bottom: 24, right: 24, zIndex: 800,
           width: 62, height: 62, border: 'none', borderRadius: '50%',
-          background: '#ef4444', color: '#fff', cursor: 'pointer',
+          background: pendientes.length > 0 ? '#ef4444' : '#F0A800',
+          color: pendientes.length > 0 ? '#fff' : '#000',
+          cursor: 'pointer',
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2,
           boxShadow: '0 0 0 0 rgba(239,68,68,0.6)',
-          animation: 'delivery-pulse 1.4s infinite',
+          animation: pendientes.length > 0 ? 'delivery-pulse 1.4s infinite' : 'none',
         }}>
         <span style={{ fontSize: 22, lineHeight: 1 }}>🛵</span>
         <span style={{ fontSize: 11, fontWeight: 900, fontFamily: 'monospace', lineHeight: 1 }}>
-          {pendientes.length}
+          {totalBadge}
         </span>
       </button>
 
@@ -227,6 +309,49 @@ export default function DeliveryAlerts({ cajero }: Props) {
 
             {/* Lista */}
             <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+              {/* Sección activas (en preparación) */}
+              {activas.length > 0 && (
+                <>
+                  <p style={{ color: '#F0A800', fontSize: 10, fontWeight: 900, textTransform: 'uppercase', letterSpacing: 2, margin: '4px 0 6px' }}>
+                    ⏳ En preparación ({activas.length})
+                  </p>
+                  {activas.map(o => (
+                    <div key={o.id} style={{ background: 'var(--dark)', border: '1px solid var(--border)', borderLeft: '4px solid #F0A800', padding: '12px 14px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                        <div>
+                          <p style={{ color: 'var(--text)', fontWeight: 900, fontSize: 13, margin: 0 }}>{o.cliente_nombre}</p>
+                          <p style={{ color: o.tipo_entrega === 'domicilio' ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: 900, margin: '2px 0 0' }}>
+                            {o.tipo_entrega === 'domicilio' ? '🛵 Domicilio' : '🏪 Recoger'}
+                          </p>
+                        </div>
+                        <span style={{ color: 'var(--yellow)', fontWeight: 900, fontSize: 14 }}>${totalOrden(o).toFixed(2)}</span>
+                      </div>
+                      <button
+                        onClick={() => marcarEnCamino(o)}
+                        disabled={procesando}
+                        style={{
+                          width: '100%', padding: '10px', background: '#F0A800', color: '#000',
+                          fontWeight: 900, fontSize: 12, textTransform: 'uppercase',
+                          border: 'none', cursor: procesando ? 'not-allowed' : 'pointer',
+                          letterSpacing: 1, fontFamily: 'monospace', opacity: procesando ? 0.5 : 1,
+                        }}>
+                        {o.tipo_entrega === 'domicilio' ? '🛵 Marcar en camino' : '✅ Marcar como listo'}
+                      </button>
+                    </div>
+                  ))}
+                  {pendientes.length > 0 && (
+                    <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+                  )}
+                </>
+              )}
+
+              {/* Sección pendientes */}
+              {pendientes.length > 0 && (
+                <p style={{ color: '#ef4444', fontSize: 10, fontWeight: 900, textTransform: 'uppercase', letterSpacing: 2, margin: '0 0 6px' }}>
+                  🔴 Esperando confirmación ({pendientes.length})
+                </p>
+              )}
               {pendientes.map(o => (
                 <button
                   key={o.id}
