@@ -1,0 +1,11 @@
+{
+  "assets": [
+    "dist/**/*",
+    "print-server/server.cjs",
+    "print-server/logo-escpos.js",
+    "public/logo.png",
+    "serve-pos.cjs"
+  ],
+  "targets": ["node18-win-x64"],
+  "outputPath": "installer/output"
+}

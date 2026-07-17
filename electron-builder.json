@@ -1,0 +1,58 @@
+{
+  "appId": "mx.cafedelconstructor.pos",
+  "productName": "Cafe POS",
+  "copyright": "El Cafe del Constructor",
+  "directories": {
+    "output": "C:\\CafePosBuild\\output"
+  },
+  "files": [
+    "electron/main.js",
+    "electron/preload.js",
+    "electron/package.json",
+    "!node_modules/**/*",
+    "!src/**/*",
+    "!*.ts",
+    "!*.tsx",
+    "!vite.config.*",
+    "!tsconfig.*"
+  ],
+  "extraResources": [
+    {
+      "from": "dist",
+      "to": "app/dist"
+    },
+    {
+      "from": "print-server",
+      "to": "app/print-server"
+    },
+    {
+      "from": "public/logo.png",
+      "to": "app/public/logo.png"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/icon.ico",
+    "requestedExecutionLevel": "asInvoker"
+  },
+  "publish": {
+    "provider": "github",
+    "owner": "scrappykong20",
+    "repo": "cafe-pos"
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": true,
+    "allowElevation": true,
+    "deleteAppDataOnUninstall": false,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Cafe POS",
+    "runAfterFinish": true
+  }
+}

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0D0D0D" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Café POS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <!-- Pantalla de carga con logo — desaparece cuando React monta -->
+    <div id="splash" style="
+      position:fixed;inset:0;z-index:99999;
+      background:#0D0D0D;
+      display:flex;flex-direction:column;
+      align-items:center;justify-content:center;
+      transition:opacity .6s ease;
+    ">
+      <img src="./logo.png" alt="Café del Constructor"
+        style="width:220px;max-width:60vw;object-fit:contain;
+               animation:pulse 1.8s ease-in-out infinite" />
+      <div style="
+        margin-top:28px;width:180px;height:3px;
+        background:#1e293b;border-radius:99px;overflow:hidden
+      ">
+        <div id="splash-bar" style="
+          height:100%;width:0%;
+          background:#F0A800;border-radius:99px;
+          animation:load 2.2s ease forwards
+        "></div>
+      </div>
+      <p style="margin-top:16px;color:#475569;font-family:sans-serif;
+                font-size:13px;letter-spacing:.15em;text-transform:uppercase">
+        Cargando sistema...
+      </p>
+    </div>
+    <style>
+      @keyframes pulse{0%,100%{opacity:1}50%{opacity:.75}}
+      @keyframes load{0%{width:0%}80%{width:90%}100%{width:100%}}
+    </style>
+    <script>
+      // Ocultar splash cuando React haya montado
+      document.addEventListener('DOMContentLoaded', function() {
+        var splash = document.getElementById('splash')
+        var observer = new MutationObserver(function() {
+          if (document.getElementById('root').children.length > 0) {
+            observer.disconnect()
+            setTimeout(function() {
+              splash.style.opacity = '0'
+              setTimeout(function() { splash.style.display = 'none' }, 650)
+            }, 400)
+          }
+        })
+        observer.observe(document.getElementById('root'), { childList: true, subtree: true })
+        // Failsafe: ocultar a los 5s sin importar que
+        setTimeout(function() {
+          splash.style.opacity = '0'
+          setTimeout(function() { splash.style.display = 'none' }, 650)
+        }, 5000)
+      })
+    </script>
+
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

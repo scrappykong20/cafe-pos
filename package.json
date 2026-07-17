@@ -1,0 +1,44 @@
+{
+  "name": "cafe-pos",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host",
+    "android": "npm run build && npx cap sync android && npx cap open android",
+    "electron": "npm run build && electron .",
+    "make-exe": "npm run build && electron-builder --win --config electron-builder.json",
+    "publish": "npm run build && electron-builder --win --config electron-builder.json --publish always",
+    "make-installer": "npm run build && npx pkg installer/setup.js --targets node18-win-x64 --output installer/output/CafePOS-Setup.exe --config pkg.json"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@supabase/supabase-js": "^2.46.0",
+    "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
+    "electron-updater": "^6.8.9",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hot-toast": "^2.4.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3",
+    "postcss": "^8.4.49",
+    "sharp": "^0.35.3",
+    "tailwindcss": "^3.4.17",
+    "to-ico": "^1.1.5",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.5",
+    "vite-plugin-pwa": "^0.21.1"
+  }
+}

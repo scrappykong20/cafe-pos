@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../supabase'
 import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
-import { buildComandaHTML, imprimirHTML, getPrinterCocina } from '../services/printer'
+import { buildComandaHTML, imprimirPorTipo } from '../services/printer'
 
 interface DeliveryItem {
   id: string
@@ -156,13 +156,7 @@ export default function DeliveryAlerts({ cajero }: Props) {
         notaOrden: infoLinea || undefined,
       })
 
-      const printer = getPrinterCocina()
-      let printed = false
-      if (printer) printed = await imprimirHTML(printer, html)
-      if (!printed) {
-        const w = window.open('', '_blank', 'width=420,height=650,toolbar=no,menubar=no')
-        if (w) { w.document.write(html); w.focus(); w.print(); setTimeout(() => w.close(), 3000) }
-      }
+      await imprimirPorTipo('cocina', html)
 
       toast.success(`✅ Orden de ${orden.cliente_nombre} aceptada · comanda impresa`)
 
