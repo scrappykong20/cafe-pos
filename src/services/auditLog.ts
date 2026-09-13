@@ -11,12 +11,12 @@ export async function registrarAccion(
   usuarioNombre?: string,
 ): Promise<void> {
   try {
-    await supabase.from('audit_log').insert({
+    const { error } = await supabase.from('log_auditoria').insert({
       accion,
       detalle,
-      usuario_nombre: usuarioNombre ?? 'Sistema',
-      created_at: new Date().toISOString(),
+      cajero_nombre: usuarioNombre ?? 'Sistema',
     })
+    if (error) console.warn('[auditLog] Error al registrar acción:', accion, error.message)
   } catch (err) {
     console.warn('[auditLog] Error al registrar acción:', accion, err)
   }

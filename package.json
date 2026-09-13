@@ -1,7 +1,9 @@
 {
   "name": "cafe-pos",
+  "description": "Sistema POS para El Cafe del Constructor",
+  "author": "El Cafe del Constructor",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.5.0",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {

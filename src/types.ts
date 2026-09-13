@@ -82,11 +82,11 @@ export interface Venta {
   subtotal: number
   descuento: number
   total: number
-  metodo_pago: 'efectivo' | 'tarjeta'
+  metodo_pago: 'efectivo' | 'tarjeta' | 'mixto'
   efectivo_recibido: number | null
   cambio: number | null
   engranajes_ganados: number
-  estado: string
+  estado: 'completada' | 'devuelta' | 'cancelada'
   created_at: string
 }
 

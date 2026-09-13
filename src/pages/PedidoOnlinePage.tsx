@@ -46,17 +46,24 @@ export default function PedidoOnlinePage() {
   useEffect(() => { cargarMenu() }, [])
 
   async function cargarMenu() {
-    const { data } = await supabase
-      .from('menu')
-      .select('id, nombre, emoji, categoria, precio, descripcion')
-      .eq('disponible', true)
-      .order('categoria').order('nombre')
-    if (data) {
-      setMenu(data)
-      const cats = Array.from(new Set(data.map((i: MenuItem) => i.categoria)))
-      setCategorias(cats)
+    try {
+      const { data, error } = await supabase
+        .from('menu')
+        .select('id, nombre, emoji, categoria, precio, descripcion')
+        .eq('disponible', true)
+        .order('categoria').order('nombre')
+      if (error) {
+        toast.error('Error al cargar el menú')
+        return
+      }
+      if (data) {
+        setMenu(data)
+        const cats = Array.from(new Set(data.map((i: MenuItem) => i.categoria)))
+        setCategorias(cats)
+      }
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const menuFiltrado = catActiva === 'Todos' ? menu : menu.filter(i => i.categoria === catActiva)
@@ -84,6 +91,7 @@ export default function PedidoOnlinePage() {
   function qty(menuId: string) { return cart.find(c => c.menuId === menuId)?.cantidad ?? 0 }
 
   async function enviarPedido() {
+    if (enviando) return
     if (!form.nombre.trim()) { toast.error('Ingresa tu nombre'); return }
     if (!form.telefono.trim()) { toast.error('Ingresa tu teléfono'); return }
     if (form.tipo_entrega === 'domicilio' && !form.direccion.trim()) {
@@ -113,7 +121,12 @@ export default function PedidoOnlinePage() {
 
       if (error) throw new Error(error.message)
 
-      const id = (data as any)?.id ?? ''
+      const id = (data as any)?.id || (data as any)?.[0]?.id
+      if (!id) {
+        toast.error('Error: no se recibió referencia de pedido')
+        setEnviando(false)
+        return
+      }
       setOrdenConfirmada(id.slice(0, 6).toUpperCase())
       setCart([])
       setShowCart(false)

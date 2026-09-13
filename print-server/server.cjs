@@ -113,10 +113,24 @@ function listarImpresoras() {
   }
 }
 
+// Orígenes permitidos para CORS
+const ORIGENES_PERMITIDOS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:4173',
+  'app://.',
+]
+
+function esNombreImpresoraSeguro(nombre) {
+  return typeof nombre === 'string' && /^[\w\s\-\.\(\)áéíóúÁÉÍÓÚñÑ,]+$/.test(nombre) && nombre.length < 200
+}
+
 // Servidor HTTP
 const server = http.createServer(async (req, res) => {
-  // CORS para localhost
-  res.setHeader('Access-Control-Allow-Origin', '*')
+  // CORS restrictivo — solo orígenes conocidos
+  const origin = req.headers.origin || ''
+  const origenPermitido = ORIGENES_PERMITIDOS.includes(origin) ? origin : ORIGENES_PERMITIDOS[0]
+  res.setHeader('Access-Control-Allow-Origin', origenPermitido)
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 
@@ -131,7 +145,18 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/print') {
     let body = ''
-    req.on('data', chunk => { body += chunk })
+    let bodySize = 0
+    const MAX_BODY = 2 * 1024 * 1024 // 2 MB — un ticket ESC/POS jamás supera esto
+    req.on('data', chunk => {
+      bodySize += chunk.length
+      if (bodySize > MAX_BODY) {
+        res.writeHead(413, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'Payload demasiado grande' }))
+        req.destroy()
+        return
+      }
+      body += chunk
+    })
     req.on('end', async () => {
       try {
         const { printer, ip, puerto, data } = JSON.parse(body)
@@ -145,6 +170,11 @@ const server = http.createServer(async (req, res) => {
           console.log(`[print] TCP → ${ip}:${puerto || 9100}`)
           ok = await imprimirRawTCP(ip, data, puerto || 9100)
         } else if (printer) {
+          if (!esNombreImpresoraSeguro(printer)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Nombre de impresora inválido' }))
+            return
+          }
           console.log(`[print] USB/Local → ${printer}`)
           ok = imprimirRaw(printer, data)
         } else {

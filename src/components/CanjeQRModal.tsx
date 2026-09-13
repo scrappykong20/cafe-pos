@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../supabase'
 import toast from 'react-hot-toast'
 import QRScannerModal from './QRScannerModal'
+import { crearTicket, buildComandaHTML, imprimirPorTipo } from '../services/printer'
 
 interface Reward {
   id: string
@@ -29,9 +30,10 @@ interface Preview {
 
 interface Props {
   onClose: () => void
+  cajeroNombre?: string
 }
 
-export default function CanjeQRModal({ onClose }: Props) {
+export default function CanjeQRModal({ onClose, cajeroNombre = '' }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   const [tokenInput, setTokenInput]   = useState('')
@@ -44,7 +46,8 @@ export default function CanjeQRModal({ onClose }: Props) {
 
   // foco automático en el campo al montar
   useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 80)
+    const id = setTimeout(() => inputRef.current?.focus(), 80)
+    return () => clearTimeout(id)
   }, [])
 
   // ── Captura Enter del lector USB ─────────────────────────────────────────────
@@ -85,8 +88,55 @@ export default function CanjeQRModal({ onClose }: Props) {
     }
   }
 
+  // ── Imprimir tickets de canje ────────────────────────────────────────────────
+  async function imprimirTicketsCanje(
+    info: { usuario: string; rewards: Reward[]; antes: number; despues: number },
+    prev: Preview
+  ) {
+    const hora  = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+    const fecha = new Date().toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })
+
+    // ── Ticket de caja ──
+    const t = crearTicket()
+      .encabezado('EL CAFE DEL CONSTRUCTOR', 'CANJE DE RECOMPENSA')
+      .linea(`Fecha:   ${fecha}  ${hora}`)
+      .linea(`Cliente: ${prev.usuario.nombre} ${prev.usuario.last_name}`)
+      .sep()
+
+    for (const r of info.rewards) {
+      t.fila(`  ${r.nombre}`, `-${r.costo} eng`)
+    }
+
+    t.sep()
+     .fila('Engranajes antes',   `${info.antes}`)
+     .filaB('Engranajes despues', `${info.despues}`)
+     .sep()
+     .centrar('¡Gracias por canjear tus recompensas!')
+
+    imprimirPorTipo('caja', t.fin()).catch(() => {})
+
+    // ── Comanda de cocina ──
+    const comandaItems = info.rewards.map(r => ({
+      emoji:    '🎁',
+      nombre:   r.nombre,
+      cantidad: 1,
+      notas:    null as string | null,
+    }))
+
+    const comanda = buildComandaHTML({
+      ordenStr:     '',
+      mesaNombre:   'CANJE',
+      cajeroNombre,
+      tipo:         'comedor',
+      hora,
+      items:        comandaItems,
+    })
+    imprimirPorTipo('cocina', comanda).catch(() => {})
+  }
+
   // ── Confirmar canje ──────────────────────────────────────────────────────────
   async function confirmarCanje() {
+    if (confirmando) return
     if (!preview) return
     setConfirmando(true)
     setError(null)
@@ -103,13 +153,29 @@ export default function CanjeQRModal({ onClose }: Props) {
       if (result?.error) throw new Error(result.error)
       if (!result?.ok)   throw new Error('No se pudo procesar el canje')
 
-      setExitoInfo({
-        usuario:  result.usuario ?? preview.usuario.nombre,
-        rewards:  result.rewards ?? preview.rewards,
-        antes:    result.engranajes_antes,
-        despues:  result.engranajes_despues,
-      })
+      const info = {
+        usuario: result.usuario ?? preview.usuario.nombre,
+        rewards: result.rewards ?? preview.rewards,
+        antes:   result.antes   ?? result.engranajes_antes  ?? preview.engranajes,
+        despues: result.despues ?? result.engranajes_despues ?? Math.max(0, preview.engranajes - preview.total_costo),
+      }
+
+      setExitoInfo(info)
       toast.success('¡Canje procesado correctamente!')
+
+      // Imprimir tickets (caja + cocina) — sin bloquear UI
+      void imprimirTicketsCanje(info, preview)
+
+      // Notificación email + push al cliente
+      supabase.functions.invoke('Notificacion-Push', {
+        body: {
+          usuario_id:  preview.usuario.id,
+          titulo:      '🎁 ¡Recompensa canjeada!',
+          descripcion: `Canjeaste: ${info.rewards.map((r: Reward) => r.nombre).join(', ')}. Te quedan ${info.despues} engranajes.`,
+          saldo_nuevo: info.despues,
+        },
+      }).catch(() => {})
+
     } catch (err: any) {
       setError(err.message ?? 'Error al confirmar el canje')
     } finally {
@@ -132,7 +198,7 @@ export default function CanjeQRModal({ onClose }: Props) {
     setTokenInput('')
     setError(null)
     setShowScanner(true)
-    setTimeout(() => inputRef.current?.focus(), 80)
+    requestAnimationFrame(() => inputRef.current?.focus())
   }
 
   // ────────────────────────────────────────────────────────────────────────────

@@ -106,8 +106,12 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
   }, [sesionActiva])
 
   async function cargarPersonal() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('personal').select('id, nombre, apellido, rol, pin').eq('activo', true)
+    if (error) {
+      toast.error('Error al cargar empleados — verifica conexión')
+      return
+    }
     if (data) setPersonal(data as StaffMember[])
   }
 
@@ -195,7 +199,8 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
   async function verificarPin(pinIngresado: string) {
     setVerificando(true)
     await new Promise(r => setTimeout(r, 380))
-    const encontrado = personal.find(p => p.pin === pinIngresado)
+    // Convertir a string por si el campo pin es integer en la BD
+    const encontrado = personal.find(p => p.pin != null && String(p.pin) === pinIngresado)
     if (encontrado) {
       const rol = (encontrado.rol ?? '').toLowerCase().trim()
       if (rol === 'cocinero') {
@@ -211,12 +216,13 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
       setLoginOk(encontrado)
       setLoginProgress(0)
       let p = 0
+      let cancelled = false
       progressRef.current = setInterval(() => {
         p += 2
-        setLoginProgress(p)
+        if (!cancelled) setLoginProgress(p)
         if (p >= 100) {
           if (progressRef.current) clearInterval(progressRef.current)
-          onLogin({
+          if (!cancelled) onLogin({
             id: encontrado.id,
             nombre: encontrado.nombre,
             last_name: encontrado.apellido,
@@ -225,6 +231,9 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
           })
         }
       }, 40)
+      // Marcar cancelado al desmontar (el cleanup de useEffect ya hace clearInterval,
+      // pero cancelled evita que onLogin dispare tras unmount)
+      ;(progressRef as any)._cancelLogin = () => { cancelled = true }
     } else {
       setPinError(true)
       setTimeout(() => { setPinError(false); setPin('') }, 750)
@@ -243,7 +252,7 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
       .gte('hora_entrada', hoyInicio.toISOString())
       .is('hora_salida', null)
       .order('hora_entrada', { ascending: true })
-    if (error) console.error('cargarPresentes error:', error)
+    if (error) toast.error('Error al cargar asistencia')
     setPresentes((data as any[]) ?? [])
   }
 
@@ -271,7 +280,7 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
   async function verificarEntrada(pin: string) {
     setEntVerif(true)
     await new Promise(r => setTimeout(r, 350))
-    const emp = personal.find(p => p.pin === pin)
+    const emp = personal.find(p => p.pin != null && String(p.pin) === pin)
     if (!emp) {
       setEntError(true)
       setTimeout(() => { setEntError(false); setEntPin('') }, 750)
@@ -291,7 +300,6 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
       tipo: 'normal',
     })
     if (insertErr) {
-      console.error('Error marcando entrada:', insertErr)
       toast.error('Error al registrar entrada')
       setEntVerif(false)
       return
@@ -317,7 +325,7 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
     if (!salPersona) return
     setSalVerif(true)
     await new Promise(r => setTimeout(r, 350))
-    const emp = personal.find(p => p.pin === pin)
+    const emp = personal.find(p => p.pin != null && String(p.pin) === pin)
     if (!emp) {
       setSalError(true)
       setTimeout(() => { setSalError(false); setSalPin('') }, 750)
@@ -335,9 +343,10 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
     }
     const ahora = new Date().toISOString()
     const horas = (new Date(ahora).getTime() - new Date(salPersona.hora_entrada).getTime()) / 3600000
-    await supabase.from('turnos_personal')
+    const { error } = await supabase.from('turnos_personal')
       .update({ hora_salida: ahora, horas_trabajadas: parseFloat(horas.toFixed(2)) })
       .eq('id', salPersona.id)
+    if (error) { toast.error('Error al registrar salida'); setSalVerif(false); return }
     setSalPin('')
     setSalVerif(false)
     setSalOk(nombre)
@@ -345,20 +354,34 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
     setTimeout(() => { setSalOk(null); setSalPersona(null) }, 2000)
   }
 
-  useEffect(() => () => { if (progressRef.current) clearInterval(progressRef.current) }, [])
+  useEffect(() => () => {
+    if (progressRef.current) {
+      ;(progressRef as any)._cancelLogin?.()
+      clearInterval(progressRef.current)
+    }
+  }, [])
 
   async function loginConEmail(e: React.FormEvent) {
+    if (loginAdmin) return
     e.preventDefault()
     setLoginAdmin(true)
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) { toast.error('Credenciales incorrectas'); setLoginAdmin(false); return }
-    if (data.user) {
-      const { data: perfil } = await supabase
-        .from('usuarios').select('id, nombre, last_name, es_admin, es_cajero')
-        .eq('id', data.user.id).single()
-      if (perfil) {
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) { toast.error('Credenciales incorrectas'); return }
+      if (data.user) {
+        const { data: perfil, error: perfilError } = await supabase
+          .from('usuarios').select('id, nombre, last_name, es_admin, es_cajero')
+          .eq('id', data.user.id).single()
+        if (perfilError || !perfil) {
+          toast.error('Perfil no encontrado en el sistema')
+          return
+        }
         onLogin({ id: (perfil as any).id, nombre: (perfil as any).nombre, last_name: (perfil as any).last_name, rol: (perfil as any).es_admin ? 'admin' : 'cajero', turno: new Date().getHours() < 15 ? 'mañana' : 'tarde' })
-      } else { toast.error('Perfil no encontrado'); setLoginAdmin(false) }
+      }
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
+      setLoginAdmin(false)
     }
   }
 
@@ -801,9 +824,9 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
                 </p>
               </div>
               <form onSubmit={loginConEmail} style={{ display:'flex', flexDirection:'column', gap:10, width:'100%' }}>
-                <input type="email" placeholder="Correo de administrador" value={email}
+                <input type="email" inputMode="email" enterKeyHint="next" placeholder="Correo de administrador" value={email}
                   onChange={e => setEmail(e.target.value)} className="field" required />
-                <input type="password" placeholder="Contraseña" value={password}
+                <input type="password" inputMode="text" enterKeyHint="done" placeholder="Contraseña" value={password}
                   onChange={e => setPassword(e.target.value)} className="field" required />
                 <button type="submit" disabled={loginAdmin} className="btn-gold" style={{ marginTop:4 }}>
                   {loginAdmin ? 'Activando…' : 'Activar POS'}
@@ -857,9 +880,9 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
                 </div>
                 {mostrarAdmin && (
                   <form onSubmit={loginConEmail} style={{ display:'flex', flexDirection:'column', gap:9 }}>
-                    <input type="email" placeholder="Correo de administrador" value={email}
+                    <input type="email" inputMode="email" enterKeyHint="next" placeholder="Correo de administrador" value={email}
                       onChange={e => setEmail(e.target.value)} className="field" required />
-                    <input type="password" placeholder="Contraseña" value={password}
+                    <input type="password" inputMode="text" enterKeyHint="done" placeholder="Contraseña" value={password}
                       onChange={e => setPassword(e.target.value)} className="field" required />
                     <button type="submit" disabled={loginAdmin} className="btn-gold">
                       {loginAdmin ? 'Entrando…' : 'Entrar como Admin'}

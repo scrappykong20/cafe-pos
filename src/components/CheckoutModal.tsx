@@ -17,6 +17,7 @@ import {
 } from '../services/mercadopago'
 import { registrarAccion } from '../services/auditLog'
 import { imprimirPorTipo, hayImpresora, buildReciboHTML, buildComandaHTML } from '../services/printer'
+import { addToQueue } from '../services/offlineQueue'
 
 interface Props {
   cart: CartItem[]
@@ -47,6 +48,7 @@ interface ClienteCompleto {
   racha_dias: number | null
   ultima_visita: string | null
   cumple_anio: number | null
+  fecha_nac: string | null
   recompensas_disponibles: RecompensaDisponible[]
   // D1 — descuento empleado
   es_empleado?: boolean
@@ -122,6 +124,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
   const mpPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const mpTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const procesandoRef = useRef(false)
   // Mejora 2 — RFC para factura
   const [rfcCliente, setRfcCliente] = useState('')
   const [showRfc, setShowRfc] = useState(false)
@@ -132,7 +135,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
   const [promoActivas, setPromoActivas] = useState<Set<string>>(new Set())
   // Cupones
   const [cuponInput, setCuponInput] = useState('')
-  const [cuponAplicado, setCuponAplicado] = useState<{ id: string; codigo: string; tipo: string; valor: number; usos_maximos?: number } | null>(null)
+  const [cuponAplicado, setCuponAplicado] = useState<{ id: string; codigo: string; tipo: string; valor: number; usos_maximos?: number; usos_actuales?: number } | null>(null)
   const [cuponBuscando, setCuponBuscando] = useState(false)
   const [cuponError, setCuponError] = useState('')
   // Consumo empleado
@@ -199,8 +202,11 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     .filter(i => canjeItems.has(i.menu_id))
     .reduce((s, i) => s + costoEngranajes(i.precio, i.cantidad), 0)
 
-  // B2 — propina en pesos fijos
-  const propinaMonto = propinaCustomMode ? (parseFloat(propinaCustomInput) || 0) : propinaMontFijo
+  // B2 — propina en pesos fijos (custom: máx 5× el total para evitar errores de tipeo)
+  const propinaCustomRaw = parseFloat(propinaCustomInput) || 0
+  const propinaCustomValida = Math.min(propinaCustomRaw, Math.max(total * 5, 500))
+  const propinaMonto = propinaCustomMode ? propinaCustomValida : propinaMontFijo
+  const propinaAdvertencia = propinaCustomMode && propinaCustomRaw > total
   // D1 — descuento empleado: 50% máximo $200
   const descEmpleadoMonto = (cliente?.es_empleado && descEmpleadoActivo)
     ? Math.min(total * 0.5, 200)
@@ -234,7 +240,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     : metodoPago === 'mixto'
       ? Math.max(0, efectivoMixtoVal + tarjetaMixtoVal - totalACobrar)
       : 0
-  const engranajes = Math.floor((total - montoCanjeado) / 10)
+  const engranajes = Math.max(0, Math.floor((total - montoCanjeado) / 10))
   const tieneEngranajeSuficiente = !cliente || engranajesTotalesCanje <= (cliente.engranajes ?? 0)
   const puedeConfirmar = tieneEngranajeSuficiente && (
     metodoPago === 'tarjeta' ||
@@ -247,7 +253,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     if (!query || query.length < 3) { toast.error('Ingresa al menos 3 caracteres'); return }
     setBuscando(true)
     try {
-      const SELECT = 'id, nombre, last_name, correo, telefono, engranajes, nivel, racha_dias, ultima_visita, cumple_anio, es_empleado'
+      const SELECT = 'id, nombre, last_name, correo, telefono, engranajes, nivel, racha_dias, ultima_visita, cumple_anio, fecha_nac, es_empleado'
 
       // 1. Exact phone match
       let { data, error } = await supabase
@@ -348,10 +354,10 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       .maybeSingle()
     setCuponBuscando(false)
     if (error || !data) { setCuponError('Cupón no encontrado o inactivo'); return }
-    if (data.usos_actuales >= data.usos_maximos) { setCuponError('Cupón agotado'); return }
+    if (data.usos_maximos != null && (data.usos_actuales ?? 0) >= data.usos_maximos) { setCuponError('Cupón agotado'); return }
     if (data.valido_desde && hoy < data.valido_desde) { setCuponError('Cupón aún no es válido'); return }
     if (data.valido_hasta && hoy > data.valido_hasta) { setCuponError('Cupón expirado'); return }
-    setCuponAplicado({ id: data.id, codigo: data.codigo, tipo: data.tipo, valor: data.valor, usos_maximos: data.usos_maximos })
+    setCuponAplicado({ id: data.id, codigo: data.codigo, tipo: data.tipo, valor: data.valor, usos_maximos: data.usos_maximos, usos_actuales: data.usos_actuales })
     setCuponInput('')
     toast.success(`Cupón ${data.codigo} aplicado`)
   }
@@ -370,49 +376,60 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       const info = Array.isArray(data) ? data[0] : data
       if (!info || !info.usuario) { toast.error('QR no contiene datos de usuario'); return }
 
+      const uid = info.usuario.id ?? ''
+
+      // Re-fetchear datos reales del usuario directamente (el RPC puede devolver engranajes desactualizados)
+      const { data: usuarioReal } = await supabase
+        .from('usuarios')
+        .select('id, nombre, last_name, correo, telefono, engranajes, nivel, racha_dias, ultima_visita, cumple_anio, fecha_nac, es_empleado')
+        .eq('id', uid)
+        .maybeSingle()
+
+      const engActuales = usuarioReal?.engranajes ?? info.engranajes ?? 0
+
       // ── Detectar si es un QR de CANJE DE RECOMPENSA ──────────────────────────
       if (info.rewards && info.rewards.length > 0 && info.total_costo > 0) {
-        // Es un QR de canje — mostrar confirmación directamente
         setCanjePreview({
-          token_id:   tokenId,
-          usuario:    info.usuario,
-          rewards:    info.rewards,
+          token_id:    tokenId,
+          usuario:     info.usuario,
+          rewards:     info.rewards,
           total_costo: info.total_costo,
-          engranajes: info.engranajes ?? 0,
+          engranajes:  engActuales,
         })
         return
       }
 
       // ── QR normal: identificar cliente para acreditar engranajes ─────────────
-      const uid = info.usuario.id ?? ''
       const { data: recompensas } = await supabase
         .from('recompensas')
         .select('id, nombre, emoji, costo, categoria')
         .eq('disponible', true)
-        .lte('costo', info.engranajes ?? 0)
+        .lte('costo', engActuales)
         .order('costo', { ascending: true })
 
       setCliente({
         id: uid,
-        nombre: info.usuario.nombre ?? '',
-        last_name: info.usuario.last_name ?? '',
-        correo: info.usuario.correo ?? '',
-        telefono: null,
-        engranajes: info.engranajes ?? 0,
-        nivel: null,
-        racha_dias: null,
-        ultima_visita: null,
-        cumple_anio: null,
+        nombre: usuarioReal?.nombre ?? info.usuario.nombre ?? '',
+        last_name: usuarioReal?.last_name ?? info.usuario.last_name ?? '',
+        correo: usuarioReal?.correo ?? info.usuario.correo ?? '',
+        telefono: usuarioReal?.telefono ?? null,
+        engranajes: engActuales,
+        nivel: usuarioReal?.nivel ?? null,
+        racha_dias: usuarioReal?.racha_dias ?? null,
+        ultima_visita: usuarioReal?.ultima_visita ?? null,
+        cumple_anio: usuarioReal?.cumple_anio ?? null,
+        fecha_nac: usuarioReal?.fecha_nac ?? null,
         recompensas_disponibles: (recompensas ?? []) as RecompensaDisponible[],
       })
       setCanjeItems(new Set())
-      toast.success(`Cliente: ${info.usuario.nombre} ${info.usuario.last_name}`)
+      toast.success(`Cliente: ${usuarioReal?.nombre ?? info.usuario.nombre} ${usuarioReal?.last_name ?? info.usuario.last_name}`)
     } catch (err) {
       toast.error('Error al leer QR')
     }
   }
 
   async function confirmarCanjeRecompensa() {
+    if (canjeConfirmando) return
     if (!canjePreview) return
     setCanjeConfirmando(true)
     try {
@@ -539,13 +556,14 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
   async function enviarEncuesta(calificacion: number) {
     setEncuestaCalif(calificacion)
     const { data: { user } } = await supabase.auth.getUser()
-    await supabase.from('encuestas').insert({
+    const { error } = await supabase.from('encuestas').insert({
       venta_id: encuestaVentaId,
       usuario_id: user?.id ?? null,
       calificacion,
       comentario: encuestaComentario.trim() || null,
       mesa_nombre: mesaNombre,
     })
+    if (error) { console.error('Error al enviar encuesta:', error.message); setEncuestaEnviada(false); return }
     setEncuestaEnviada(true)
   }
 
@@ -556,7 +574,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     })
     const ordenStr = numeroOrden ? `#${String(numeroOrden).padStart(3, '0')}` : ''
     const metodoPagoLabel =
-      metodoPago === 'mixto' ? 'Mixto (💵+💳)' :
+      metodoPago === 'mixto' ? 'Mixto (Efec+Tarj)' :
       metodoPago === 'efectivo' ? 'Efectivo' : 'Tarjeta'
 
     const reciboItems = cart.map(i => ({
@@ -580,6 +598,8 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       canjeItems: canjeFinal,
       subtotalBase, descuentoTotal, propinaMonto, totalACobrar,
       metodoPagoLabel, cambioFinal, metodoPago,
+      efectivoMixto: metodoPago === 'mixto' ? efectivoMixtoVal : undefined,
+      tarjetaMixto:  metodoPago === 'mixto' ? tarjetaMixtoVal  : undefined,
       engranajeFinal, saldoFinal,
       clienteNombre: cliente ? `${cliente.nombre} ${cliente.last_name}` : undefined,
       cajeroNombre: `${cajero.nombre} ${cajero.last_name}`,
@@ -605,7 +625,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     setGuardandoConsumo(true)
     try {
       const items = cart.map(i => ({ emoji: i.emoji, nombre: i.nombre, cantidad: i.cantidad, notas: i.notas ?? null }))
-      await supabase.from('consumos_empleados').insert({
+      const { error: consumoError } = await supabase.from('consumos_empleados').insert({
         cajero_id: cajero.id,
         cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
         items,
@@ -613,6 +633,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         turno: cajero.turno ?? 'mañana',
         notas: `Mesa: ${mesaNombre}`,
       })
+      if (consumoError) { toast.error('Error al registrar consumo: ' + consumoError.message); return }
       // Imprimir comanda con banner de consumo empleado
       const hora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
       const comandaHtml = buildComandaHTML({
@@ -630,6 +651,43 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
   }
 
   async function confirmarVenta() {
+    if (paso !== 'pago' || procesandoRef.current) return  // guard síncrono anti-doble-pago
+
+    // BUG 4: Revalidar cupón justo antes de registrar la venta
+    if (cuponAplicado) {
+      const hoy = new Date().toISOString().split('T')[0]
+      const { data: cuponActual, error: cuponCheckErr } = await supabase
+        .from('cupones')
+        .select('id, activo, usos_maximos, usos_actuales, valido_desde, valido_hasta')
+        .eq('id', cuponAplicado.id)
+        .maybeSingle()
+      if (cuponCheckErr || !cuponActual || !cuponActual.activo) {
+        setCuponAplicado(null)
+        toast.error('El cupón ya no es válido — fue eliminado o desactivado')
+        return
+      }
+      if (cuponActual.usos_maximos != null && (cuponActual.usos_actuales ?? 0) >= cuponActual.usos_maximos) {
+        setCuponAplicado(null)
+        toast.error('El cupón ya se agotó')
+        return
+      }
+      if (cuponActual.valido_hasta && hoy > cuponActual.valido_hasta) {
+        setCuponAplicado(null)
+        toast.error('El cupón expiró')
+        return
+      }
+    }
+
+    // BUG 5: Verificar que todos los items tengan asignación en modo split
+    if (splitMode) {
+      const itemsSinAsignar = cart.filter(i => !splitAsignacion[i.menu_id])
+      if (itemsSinAsignar.length > 0) {
+        toast.error(`${itemsSinAsignar.length} ítem(s) sin asignar a ninguna cuenta`)
+        return
+      }
+    }
+
+    procesandoRef.current = true
     playCashRegisterSound()
     setPaso('procesando')
     try {
@@ -641,7 +699,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
         usuario_id: cliente?.id || null,
         subtotal: total + (descuentoMonto ?? 0),
-        descuento: (descuentoMonto ?? 0) + montoCanjeado + descEmpleadoMonto + descPromoMonto + descCuponMonto + descVolumenMonto,
+        descuento: Math.min((descuentoMonto ?? 0) + montoCanjeado + descEmpleadoMonto + descPromoMonto + descCuponMonto + descVolumenMonto, total + (descuentoMonto ?? 0)),
         total: totalACobrar,
         metodo_pago: metodoPago,
         efectivo_recibido: metodoPago === 'efectivo' ? efectivo : metodoPago === 'mixto' ? efectivoMixtoVal : null,
@@ -668,16 +726,20 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         cantidad: i.cantidad, subtotal: parseFloat((i.precio * i.cantidad).toFixed(2)),
       }))
       const { error: itemsError } = await supabase.from('venta_items').insert(items)
-      if (itemsError) toast.error('Error registrando detalle de venta — contacta al administrador')
+      if (itemsError) throw new Error('Error registrando detalle de venta: ' + itemsError.message)
 
       // Descontar inventario — usa recetas si están definidas, si no fallback por menu_id
+      // IMPORTANTE: item.menu_id puede ser "uuid__notas" cuando tiene modificadores.
+      // Siempre extraer el ID real del producto antes de buscar en recetas/inventario.
       const stockBajoItems: string[] = []
       for (const item of cart) {
-        // Buscar receta del producto
+        const realMenuId = item.producto_id ?? item.menu_id.split('__')[0]
+
+        // Buscar receta del producto usando el ID real (sin sufijo de notas)
         const { data: recetaItems } = await supabase
           .from('recetas')
           .select('cantidad_por_unidad, inventario_id, inventario:inventario_id(id, stock_actual, stock_minimo, nombre)')
-          .eq('menu_id', item.menu_id)
+          .eq('menu_id', realMenuId)
 
         if (recetaItems && recetaItems.length > 0) {
           // Descontar cada ingrediente de la receta
@@ -686,10 +748,11 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
             if (!inv) continue
             const cantDescuento = (receta.cantidad_por_unidad as number) * item.cantidad
             const nuevoStock = Math.max(0, (inv.stock_actual ?? 0) - cantDescuento)
-            await supabase.from('inventario').update({ stock_actual: nuevoStock, updated_at: new Date().toISOString() }).eq('id', inv.id)
+            const { error: invError } = await supabase.from('inventario').update({ stock_actual: nuevoStock, updated_at: new Date().toISOString() }).eq('id', inv.id)
+            if (invError) console.error('Error al descontar inventario (receta):', invError.message)
             void supabase.from('historial_inventario').insert({
               inventario_id: inv.id,
-              menu_id: item.menu_id,
+              menu_id: realMenuId,
               tipo: 'venta',
               cantidad: -cantDescuento,
               nota: `Receta: ${item.nombre} ×${item.cantidad} en ${mesaNombre}`,
@@ -700,18 +763,19 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
             }
           }
         } else {
-          // Fallback: buscar por menu_id directo en inventario
+          // Fallback: buscar por menu_id real directo en inventario
           const { data: inv } = await supabase
             .from('inventario')
             .select('id, stock_actual, stock_minimo')
-            .eq('menu_id', item.menu_id)
+            .eq('menu_id', realMenuId)
             .maybeSingle()
           if (inv) {
             const nuevoStock = Math.max(0, (inv.stock_actual ?? 0) - item.cantidad)
-            await supabase.from('inventario').update({ stock_actual: nuevoStock, updated_at: new Date().toISOString() }).eq('id', inv.id)
+            const { error: invFallbackError } = await supabase.from('inventario').update({ stock_actual: nuevoStock, updated_at: new Date().toISOString() }).eq('id', inv.id)
+            if (invFallbackError) console.error('Error al descontar inventario (fallback):', invFallbackError.message)
             void supabase.from('historial_inventario').insert({
               inventario_id: inv.id,
-              menu_id: item.menu_id,
+              menu_id: realMenuId,
               tipo: 'venta',
               cantidad: -item.cantidad,
               nota: `Venta en ${mesaNombre} — ${item.nombre}`,
@@ -738,7 +802,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       }
 
       if (cliente?.id) {
-        const { data: ud } = await supabase.from('usuarios').select('engranajes').eq('id', cliente.id).single()
+        const { data: ud } = await supabase.from('usuarios').select('engranajes, engranajes_acumulados, ultima_visita, racha_dias').eq('id', cliente.id).single()
         if (ud) {
           const saldoActual = ud.engranajes || 0
           let nuevoSaldo = saldoActual
@@ -761,9 +825,28 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
             })
           }
 
-          if (nuevoSaldo !== saldoActual) {
-            await supabase.from('usuarios').update({ engranajes: nuevoSaldo }).eq('id', cliente.id)
+          // Calcular racha de días
+          const hoyStr = new Date().toISOString().slice(0, 10)
+          const ultimaStr = (ud.ultima_visita as string | null)?.slice(0, 10) ?? null
+          let nuevaRacha = (ud.racha_dias as number | null) ?? 0
+          if (ultimaStr !== hoyStr) {
+            const ayer = new Date()
+            ayer.setDate(ayer.getDate() - 1)
+            nuevaRacha = ultimaStr === ayer.toISOString().slice(0, 10)
+              ? ((ud.racha_dias as number | null) ?? 0) + 1
+              : 1
           }
+
+          // Actualizar saldo, visita, racha y acumulados (siempre, para registrar la visita)
+          const updatePayload: Record<string, unknown> = {
+            engranajes: nuevoSaldo,
+            ultima_visita: new Date().toISOString(),
+            racha_dias: nuevaRacha,
+          }
+          if (engranajes > 0) {
+            updatePayload.engranajes_acumulados = ((ud.engranajes_acumulados as number | null) ?? 0) + engranajes
+          }
+          await supabase.from('usuarios').update(updatePayload).eq('id', cliente.id)
 
           // Notificación email + push via Edge Function
           supabase.functions.invoke('Notificacion-Push', {
@@ -790,18 +873,19 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         }
       }
 
-      // Incrementar uso de cupón si aplica (UPDATE atómico con condición para evitar race condition)
+      // Incrementar uso de cupón si aplica — incremento atómico en BD para evitar race condition
       if (cuponAplicado) {
-        const { data: cd } = await supabase.from('cupones').select('usos_actuales').eq('id', cuponAplicado.id).single()
-        if (cd) {
-          const { error: cuponError } = await supabase
+        const { error: cuponError } = await supabase.rpc('incrementar_uso_cupon', {
+          p_cupon_id: cuponAplicado.id,
+          p_usos_maximos: cuponAplicado.usos_maximos ?? 999999,
+        })
+        if (cuponError) {
+          // Fallback: UPDATE plano si el RPC no existe todavía
+          await supabase
             .from('cupones')
-            .update({ usos_actuales: cd.usos_actuales + 1 })
+            .update({ usos_actuales: (cuponAplicado.usos_actuales ?? 0) + 1 })
             .eq('id', cuponAplicado.id)
             .lt('usos_actuales', cuponAplicado.usos_maximos ?? 999999)
-          if (cuponError) {
-            toast.error('El cupón ya no tiene usos disponibles')
-          }
         }
       }
 
@@ -835,9 +919,50 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         cajero.nombre,
       )
       setPaso('exito')
-    } catch (err) {
-      toast.error('Error al procesar la venta')
-      setPaso('pago')
+    } catch (err: any) {
+      // Si el error es de red (offline), guardar en cola y marcar como exitoso
+      const esErrorRed = !navigator.onLine
+        || err?.message?.includes('Failed to fetch')
+        || err?.message?.includes('NetworkError')
+        || err?.message?.includes('fetch')
+
+      if (esErrorRed) {
+        addToQueue({
+          cajero_id:         cajero.id,
+          cajero_nombre:     `${cajero.nombre} ${cajero.last_name}`,
+          mesa_nombre:       mesaNombre,
+          orden_id:          ordenId,
+          metodo_pago:       metodoPago as 'efectivo' | 'tarjeta' | 'mixto',
+          subtotal:          total + (descuentoMonto ?? 0),
+          descuento:         Math.min((descuentoMonto ?? 0) + montoCanjeado + descEmpleadoMonto + descPromoMonto + descCuponMonto + descVolumenMonto, total + (descuentoMonto ?? 0)),
+          total:             totalACobrar,
+          efectivo_recibido: metodoPago === 'efectivo' || metodoPago === 'mixto' ? efectivoMixtoVal || efectivo : null,
+          cambio:            metodoPago === 'efectivo' || metodoPago === 'mixto' ? cambio : null,
+          propina:           propinaMonto,
+          engranajes_ganados: cliente ? engranajes : 0,
+          usuario_id:        cliente?.id ?? null,
+          rfc_cliente:       rfcCliente.trim() || undefined,
+          items:             cart.map(i => ({
+            menu_id:    i.menu_id,
+            producto_id: i.producto_id,
+            nombre:     i.nombre,
+            emoji:      i.emoji,
+            precio:     i.precio,
+            cantidad:   i.cantidad,
+            notas:      i.notas,
+          })),
+        })
+        setCambioFinal(cambio)
+        setEngranajeFinal(engranajes)
+        setCanjeFinal([])
+        setSaldoFinal(0)
+        toast('⚡ Venta guardada sin conexión — se sincronizará automáticamente', { duration: 5000 })
+        setPaso('exito')
+      } else {
+        toast.error('Error al procesar la venta')
+        setPaso('pago')
+        procesandoRef.current = false
+      }
     }
   }
 
@@ -854,8 +979,12 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
   }, [paso, puedeConfirmar, showCancelConfirm, showScanner, showSearch])
 
   const hoy = new Date()
-  const esCumple = cliente?.cumple_anio === hoy.getMonth() + 1
-  const isEmpleado = mesaNombre === 'Empleado'
+  const esCumple = (() => {
+    if (!cliente?.fecha_nac) return false
+    const nac = new Date(cliente.fecha_nac + 'T12:00:00')
+    return nac.getMonth() === hoy.getMonth() && nac.getDate() === hoy.getDate()
+  })()
+  const isEmpleado = mesaNombre.startsWith('Empleado:')
 
   // ── Vista simplificada para consumo de empleado ──────────────────────
   if (isEmpleado) {
@@ -1602,9 +1731,11 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
                       <input
                         ref={searchRef}
                         type="text"
+                        inputMode="search"
+                        enterKeyHint="search"
                         value={telefonoInput}
                         onChange={e => setTelefonoInput(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && buscarPorTelefono()}
+                        onKeyDown={e => { if (e.key === 'Enter') { buscarPorTelefono(); (e.target as HTMLInputElement).blur() } }}
                         placeholder="Teléfono, correo o nombre"
                         className="pos-input flex-1 text-base font-black"
                         style={{ color: 'var(--text)' }}
@@ -1698,8 +1829,11 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
                     </label>
                     <input
                       type="number"
+                      inputMode="decimal"
+                      enterKeyHint="done"
                       value={efectivoInput}
                       onChange={e => setEfectivoInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
                       placeholder={`Mínimo $${totalACobrar.toFixed(2)}`}
                       className="pos-input text-lg font-black"
                       style={{ color: 'var(--yellow)' }}
@@ -1740,12 +1874,12 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
                   <div className="flex gap-2">
                     <div className="flex-1">
                       <label className="block text-xs font-black uppercase tracking-widest mb-1" style={{ color: 'var(--muted)' }}>Efectivo</label>
-                      <input type="number" value={efectivoMixto} onChange={e => setEfectivoMixto(e.target.value)}
+                      <input type="number" inputMode="decimal" enterKeyHint="next" value={efectivoMixto} onChange={e => setEfectivoMixto(e.target.value)}
                         placeholder="$0.00" className="pos-input w-full text-base font-black" style={{ color: 'var(--text)' }} min={0} />
                     </div>
                     <div className="flex-1">
                       <label className="block text-xs font-black uppercase tracking-widest mb-1" style={{ color: 'var(--muted)' }}>Tarjeta</label>
-                      <input type="number" value={tarjetaMixto} onChange={e => setTarjetaMixto(e.target.value)}
+                      <input type="number" inputMode="decimal" enterKeyHint="done" value={tarjetaMixto} onChange={e => setTarjetaMixto(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
                         placeholder="$0.00" className="pos-input w-full text-base font-black" style={{ color: 'var(--text)' }} min={0} />
                     </div>
                   </div>
@@ -1817,15 +1951,25 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
                   </button>
                 </div>
                 {propinaCustomMode && (
-                  <input
-                    type="number" min={0}
-                    value={propinaCustomInput}
-                    onChange={e => setPropinaCustomInput(e.target.value)}
-                    placeholder="Monto en pesos, ej: 30"
-                    className="w-full pos-input text-sm font-black mt-2"
-                    style={{ color: 'var(--yellow)' }}
-                    autoFocus
-                  />
+                  <>
+                    <input
+                      type="number" min={0}
+                      inputMode="decimal"
+                      enterKeyHint="done"
+                      value={propinaCustomInput}
+                      onChange={e => setPropinaCustomInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                      placeholder="Monto en pesos, ej: 30"
+                      className="w-full pos-input text-sm font-black mt-2"
+                      style={{ color: propinaAdvertencia ? '#f59e0b' : 'var(--yellow)' }}
+                      autoFocus
+                    />
+                    {propinaAdvertencia && (
+                      <p className="text-xs font-black mt-1" style={{ color: '#f59e0b' }}>
+                        ⚠ La propina supera el total de la orden — ¿es correcto?
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -1910,8 +2054,11 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
                   <div className="mt-2">
                     <input
                       type="text"
+                      inputMode="text"
+                      enterKeyHint="done"
                       value={rfcCliente}
                       onChange={e => setRfcCliente(e.target.value.toUpperCase())}
+                      onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
                       placeholder="XAXX010101000"
                       maxLength={13}
                       className="pos-input w-full text-sm font-black"

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../supabase'
 import type { CajeroActivo } from '../App'
 import toast from 'react-hot-toast'
@@ -43,6 +43,8 @@ export default function GastosPage({ cajero, onVolver }: Props) {
   const [rDia, setRDia] = useState('1')
   const [rActivo, setRActivo] = useState(true)
   const [guardandoR, setGuardandoR] = useState(false)
+  const msgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (msgTimerRef.current) clearTimeout(msgTimerRef.current) }, [])
 
   useEffect(() => {
     verificarGastosRecurrentes()
@@ -51,6 +53,10 @@ export default function GastosPage({ cajero, onVolver }: Props) {
   useEffect(() => { cargar() }, [tab])
 
   async function verificarGastosRecurrentes() {
+    const HOY = new Date().toDateString()
+    const ultimoChequeo = sessionStorage.getItem('gastos_recurrentes_chequeo')
+    if (ultimoChequeo === HOY) return
+
     const { data: recData, error } = await supabase
       .from('gastos_recurrentes')
       .select('*')
@@ -69,6 +75,9 @@ export default function GastosPage({ cajero, onVolver }: Props) {
     const fechaHoy = hoy.toISOString().split('T')[0]
 
     for (const rec of recData as GastoRecurrente[]) {
+      // Solo registrar en el día del mes configurado
+      if (hoy.getDate() !== rec.dia_mes) continue
+
       // Verificar si ya existe un gasto con ese concepto en este mes/año
       const inicioMes = `${anioActual}-${String(mesActual).padStart(2, '0')}-01`
       const finMes = new Date(anioActual, mesActual, 0).toISOString().split('T')[0]
@@ -95,25 +104,32 @@ export default function GastosPage({ cajero, onVolver }: Props) {
         }
       }
     }
+    sessionStorage.setItem('gastos_recurrentes_chequeo', HOY)
   }
 
   async function cargar() {
     setLoading(true)
-    const hoy = new Date()
-    hoy.setHours(0, 0, 0, 0)
-    let query = supabase.from('gastos').select('*').order('created_at', { ascending: false })
-    if (tab === 'hoy') {
-      query = query.eq('fecha', hoy.toISOString().split('T')[0])
-    } else {
-      const hace30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-      query = query.gte('fecha', hace30.toISOString().split('T')[0])
-    }
-    const { data } = await query
-    setGastos((data as Gasto[]) ?? [])
-    setLoading(false)
+    try {
+      const hoy = new Date()
+      hoy.setHours(0, 0, 0, 0)
+      let query = supabase.from('gastos').select('*').order('created_at', { ascending: false })
+      if (tab === 'hoy') {
+        query = query.eq('fecha', hoy.toISOString().split('T')[0])
+      } else {
+        const hace30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+        query = query.gte('fecha', hace30.toISOString().split('T')[0])
+      }
+      const { data, error } = await query
+      if (error) { toast.error('Error al cargar gastos'); return }
+      setGastos((data as Gasto[]) ?? [])
 
-    // Cargar recurrentes silenciosamente
-    cargarRecurrentes()
+      // Cargar recurrentes silenciosamente
+      cargarRecurrentes()
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function cargarRecurrentes() {
@@ -133,6 +149,7 @@ export default function GastosPage({ cajero, onVolver }: Props) {
 
   async function agregar(e: React.FormEvent) {
     e.preventDefault()
+    if (guardando) return
     const m = parseFloat(monto)
     if (!concepto.trim() || isNaN(m) || m <= 0) return
     setGuardando(true)
@@ -146,7 +163,8 @@ export default function GastosPage({ cajero, onVolver }: Props) {
     if (error) { setMsg('Error al guardar'); return }
     setConcepto(''); setMonto(''); setNotas('')
     setMsg('✓ Gasto registrado')
-    setTimeout(() => setMsg(null), 2500)
+    if (msgTimerRef.current) clearTimeout(msgTimerRef.current)
+    msgTimerRef.current = setTimeout(() => setMsg(null), 2500)
     cargar()
   }
 
@@ -159,6 +177,7 @@ export default function GastosPage({ cajero, onVolver }: Props) {
 
   async function crearRecurrente(e: React.FormEvent) {
     e.preventDefault()
+    if (guardandoR) return
     const m = parseFloat(rMonto)
     if (!rConcepto.trim() || isNaN(m) || m <= 0) return
     setGuardandoR(true)
@@ -178,12 +197,14 @@ export default function GastosPage({ cajero, onVolver }: Props) {
 
   async function eliminarRecurrente(id: string) {
     if (!confirm('¿Eliminar este gasto recurrente?')) return
-    await supabase.from('gastos_recurrentes').delete().eq('id', id)
+    const { error } = await supabase.from('gastos_recurrentes').delete().eq('id', id)
+    if (error) { toast.error('Error al eliminar recurrente'); return }
     cargarRecurrentes()
   }
 
   async function toggleRecurrente(rec: GastoRecurrente) {
-    await supabase.from('gastos_recurrentes').update({ activo: !rec.activo }).eq('id', rec.id)
+    const { error } = await supabase.from('gastos_recurrentes').update({ activo: !rec.activo }).eq('id', rec.id)
+    if (error) { toast.error('Error al actualizar recurrente'); return }
     cargarRecurrentes()
   }
 

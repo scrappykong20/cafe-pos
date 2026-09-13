@@ -1,4 +1,17 @@
 /**
+ * Escapa caracteres especiales HTML para evitar XSS al inyectar
+ * datos de la BD en templates de string de HTML (document.write / innerHTML).
+ */
+export function escHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
  * Exporta un array de objetos a CSV y dispara la descarga automática.
  * No requiere librerías externas.
  */
@@ -52,7 +65,7 @@ export function exportarPDF(titulo: string, contenidoHtml: string): void {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${titulo}</title>
+  <title>${escHtml(titulo)}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -153,7 +166,7 @@ export function exportarPDF(titulo: string, contenidoHtml: string): void {
 </head>
 <body>
   <h1>El Café del Constructor</h1>
-  <div class="subtitulo">${titulo} &nbsp;·&nbsp; Generado el ${new Date().toLocaleDateString('es-MX', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+  <div class="subtitulo">${escHtml(titulo)} &nbsp;·&nbsp; Generado el ${new Date().toLocaleDateString('es-MX', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
   ${contenidoHtml}
   <div class="footer">Reporte generado automáticamente por El Café del Constructor POS</div>
 </body>

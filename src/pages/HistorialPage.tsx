@@ -59,7 +59,9 @@ function getRango(p: Periodo): { desde: string; hasta: string } {
       return { desde: ayer.toISOString(), hasta: hoy.toISOString() }
     }
     case 'semana': {
-      const inicioSemana = new Date(hoy.getTime() - hoy.getDay() * 86400000)
+      // Semana lunes a domingo (México)
+      const diasDesdeLunes = (hoy.getDay() + 6) % 7
+      const inicioSemana = new Date(hoy.getTime() - diasDesdeLunes * 86400000)
       return { desde: inicioSemana.toISOString(), hasta: new Date(hoy.getTime() + 86400000).toISOString() }
     }
     case 'mes': {
@@ -131,27 +133,33 @@ export default function HistorialPage({ cajero: _cajero, onVolver }: Props) {
 
   const cargarVentas = useCallback(async () => {
     setLoading(true)
-    const { desde, hasta } = getRango(periodo)
+    try {
+      const { desde, hasta } = getRango(periodo)
 
-    let query = supabase
-      .from('ventas')
-      .select('id, total, metodo_pago, cajero_nombre, mesa_nombre, engranajes_ganados, estado, created_at, descuento, subtotal, efectivo_recibido, cambio, devuelta')
-      .eq('estado', 'completada')
-      .gte('created_at', desde)
-      .lt('created_at', hasta)
-      .order('created_at', { ascending: false })
-      .limit(100)
+      let query = supabase
+        .from('ventas')
+        .select('id, total, metodo_pago, cajero_nombre, mesa_nombre, engranajes_ganados, estado, created_at, descuento, subtotal, efectivo_recibido, cambio, devuelta')
+        .eq('estado', 'completada')
+        .gte('created_at', desde)
+        .lt('created_at', hasta)
+        .order('created_at', { ascending: false })
+        .limit(100)
 
-    if (metodo !== 'todos') {
-      query = query.eq('metodo_pago', metodo)
+      if (metodo !== 'todos') {
+        query = query.eq('metodo_pago', metodo)
+      }
+
+      const { data, error } = await query
+      if (error) {
+        toast.error('Error al cargar historial de ventas')
+        return
+      }
+      setVentas(data ?? [])
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
     }
-
-    const { data, error } = await query
-    if (error) {
-      toast.error('Error al cargar historial de ventas')
-    }
-    setVentas(data ?? [])
-    setLoading(false)
   }, [periodo, metodo])
 
   useEffect(() => {
@@ -182,11 +190,12 @@ export default function HistorialPage({ cajero: _cajero, onVolver }: Props) {
     // Cargar devoluciones si no están en caché
     if (!devolucionesCache[id]) {
       try {
-        const { data: devData } = await supabase
+        const { data: devData, error: devErr } = await supabase
           .from('devoluciones')
           .select('id, venta_id, cajero_nombre, motivo, monto, metodo_devolucion, created_at')
           .eq('venta_id', id)
           .order('created_at', { ascending: false })
+        if (devErr) return
         setDevolucionesCache(prev => ({ ...prev, [id]: devData ?? [] }))
       } catch (_e) {
         // silencioso

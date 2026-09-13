@@ -162,11 +162,13 @@ export default function CustomerDisplayPage() {
   // ── BroadcastChannel listener — lógica preservada intacta ────────────────
   useEffect(() => {
     const channel = new BroadcastChannel('pos-customer-display')
+    const timers: ReturnType<typeof setTimeout>[] = []
+
     channel.onmessage = (e) => {
       const msg = e.data as DisplayMessage
 
       setVisible(false)
-      setTimeout(() => {
+      timers.push(setTimeout(() => {
         if (msg.type === 'cart_update') {
           setCartData({ items: msg.items, total: msg.total, mesa: msg.mesa })
           setCheckoutData(null)
@@ -174,23 +176,23 @@ export default function CustomerDisplayPage() {
         } else if (msg.type === 'checkout') {
           setCheckoutData({ total: msg.total, cambio: msg.cambio, metodoPago: msg.metodoPago })
           setState('checkout')
-          setTimeout(() => {
+          timers.push(setTimeout(() => {
             setVisible(false)
-            setTimeout(() => {
+            timers.push(setTimeout(() => {
               setState('idle')
               setCheckoutData(null)
               setVisible(true)
-            }, 300)
-          }, 8000)
+            }, 300))
+          }, 8000))
         } else if (msg.type === 'idle') {
           setState('idle')
           setCartData(null)
           setCheckoutData(null)
         }
         setVisible(true)
-      }, 250)
+      }, 250))
     }
-    return () => channel.close()
+    return () => { channel.close(); timers.forEach(clearTimeout) }
   }, [])
 
   // ── Formatters ────────────────────────────────────────────────────────────

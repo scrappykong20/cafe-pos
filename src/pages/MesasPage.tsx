@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 
 interface OrdenResumen {
   id: string
+  mesa_id: string | null
   created_at: string
   notas: string | null
   num_personas: number | null
@@ -22,15 +23,6 @@ function colorPorOcupacion(minutos: number): { border: string; bg: string; dot: 
   return { border: 'rgba(239,68,68,0.5)', bg: 'rgba(239,68,68,0.06)', dot: '#ef4444' }
 }
 
-// Color de fondo sólido para el mapa según estado/tiempo
-function colorMapaMesa(mesa: Mesa, orden?: OrdenResumen): string {
-  if (mesa.estado === 'libre') return '#16a34a'
-  if (!orden) return '#ca8a04'
-  const mins = minutosOcupada(orden.created_at)
-  if (mins < 30) return '#ca8a04'
-  if (mins < 60) return '#ea580c'
-  return '#dc2626'
-}
 
 interface Props {
   cajero: CajeroActivo
@@ -89,6 +81,7 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
   function entrarModoJuntar() {
     setModoJuntar(true)
     setMesasSeleccionadas([])
+    setFiltro('todas') // mostrar todas para poder seleccionar libres
   }
 
   function salirModoJuntar() {
@@ -105,6 +98,7 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
   }
 
   async function confirmarUnion() {
+    if (juntandoMesas) return;
     if (mesasSeleccionadas.length < 2) return
     setJuntandoMesas(true)
     try {
@@ -126,18 +120,25 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
 
       if (ordenError || !ordenData) {
         toast.error('Error al crear orden unida')
-        setJuntandoMesas(false)
         return
       }
 
       // Marcar todas las mesas como ocupadas con esa orden
-      const updates = mesasElegidas.map(m =>
-        supabase
-          .from('mesas')
-          .update({ estado: 'ocupada', orden_id: ordenData.id })
-          .eq('id', m.id)
+      const updates = await Promise.all(
+        mesasElegidas.map(m =>
+          supabase.from('mesas').update({ estado: 'ocupada', orden_id: ordenData.id }).eq('id', m.id)
+        )
       )
-      await Promise.all(updates)
+      const mesaError = updates.find(r => r.error)
+      if (mesaError?.error) {
+        // Rollback: cancelar la orden y liberar todas las mesas que ya se marcaron como ocupadas
+        await Promise.all([
+          supabase.from('ordenes').update({ estado: 'cancelada', cerrada_at: new Date().toISOString() }).eq('id', ordenData.id),
+          supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('orden_id', ordenData.id),
+        ])
+        toast.error('Error al marcar mesas como ocupadas: ' + mesaError.error.message)
+        return
+      }
 
       toast.success(`${nombreUnion} unidas`)
       salirModoJuntar()
@@ -146,6 +147,7 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
     } catch (err) {
       toast.error('Error al unir mesas')
     } finally {
+      // Siempre liberar el guard para que la UI no quede bloqueada
       setJuntandoMesas(false)
     }
   }
@@ -153,9 +155,13 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
   useEffect(() => {
     cargarMesas()
     const interval = setInterval(() => setHora(new Date()), 1000)
+    // Usar nombre de canal único para evitar colisión si el componente se desmonta y remonta
+    const canalId = `mesas-pos-${Date.now()}`
     const canal = supabase
-      .channel('mesas-pos')
+      .channel(canalId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'mesas' }, cargarMesas)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ordenes' }, cargarMesas)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orden_items' }, cargarMesas)
       .subscribe()
     return () => {
       clearInterval(interval)
@@ -173,11 +179,12 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
     // Fetch ordenes activas para mesas ocupadas (para tiempo de ocupación + tooltip)
     const ordenIds = mesasData.filter(m => m.estado === 'ocupada' && m.orden_id).map(m => m.orden_id!)
     if (ordenIds.length > 0) {
-      const { data: ordenes } = await supabase
+      const { data: ordenes, error: ordenesErr } = await supabase
         .from('ordenes')
-        .select('id, created_at, notas, num_personas, orden_items(nombre, cantidad, emoji, precio)')
+        .select('id, mesa_id, created_at, notas, num_personas, orden_items(nombre, cantidad, emoji, precio)')
         .in('id', ordenIds)
         .in('estado', ['en_caja', 'abierta'])
+      if (ordenesErr) console.error('Error al cargar órdenes:', ordenesErr.message);
       const map: Record<string, OrdenResumen> = {}
       ;(ordenes ?? []).forEach((o: any) => { map[o.id] = o })
       setOrdenesMap(map)
@@ -185,8 +192,10 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
       setOrdenesMap({})
     }
 
-    const hoy = new Date().toISOString().split('T')[0]
-    const { data: ventasHoy } = await supabase.from('ventas').select('total').gte('created_at', hoy)
+    const ahora = new Date()
+    const hoyLocal = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate())
+    const { data: ventasHoy, error: ventasErr } = await supabase.from('ventas').select('total').gte('created_at', hoyLocal.toISOString())
+    if (ventasErr) console.error('Error al cargar ventas de hoy:', ventasErr.message);
     const totalHoy = (ventasHoy ?? []).reduce((s: number, v: any) => s + (v.total || 0), 0)
     setTurnoStats({ total: totalHoy, ordenes: ventasHoy?.length ?? 0 })
   }
@@ -198,6 +207,23 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
   const mesasLibres   = mesas.filter(m => m.estado === 'libre').length
   const mesasOcupadas = mesas.filter(m => m.estado === 'ocupada').length
   const totalMesas    = mesas.length
+
+  // Detectar mesas unidas: varias mesas con el mismo orden_id
+  const ordenIdCount: Record<string, number> = {}
+  mesas.forEach(m => { if (m.orden_id) ordenIdCount[m.orden_id] = (ordenIdCount[m.orden_id] || 0) + 1 })
+  const mesasUnidasIds = new Set(mesas.filter(m => m.orden_id && ordenIdCount[m.orden_id] > 1).map(m => m.id))
+
+  // Resolver la mesa y nombre correctos al abrir una mesa ocupada que puede ser parte de una unión
+  function resolverMesaClick(mesa: Mesa) {
+    const orden = mesa.orden_id ? ordenesMap[mesa.orden_id] : undefined
+    // Si la orden fue creada para otra mesa (mesas unidas), navegar a la mesa primaria
+    const mesaIdPrimaria = (orden?.mesa_id && orden.mesa_id !== mesa.id) ? orden.mesa_id : mesa.id
+    // Extraer nombre combinado de las notas si aplica
+    const nombreMostrado = orden?.notas?.startsWith('Mesas unidas:')
+      ? orden.notas.replace('Mesas unidas: ', '')
+      : mesa.nombre || `Mesa ${mesa.numero}`
+    onAbrirMesa(mesaIdPrimaria, nombreMostrado)
+  }
 
   const mesasFiltradas = mesas.filter(m => {
     if (filtro === 'libres')   return m.estado === 'libre'
@@ -500,7 +526,7 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
                 if (mesa.estado !== 'libre') { toast.error('Solo se pueden juntar mesas libres'); return }
                 toggleSeleccionMesa(mesa.id)
               } else {
-                onAbrirMesa(mesa.id, mesa.nombre || `Mesa ${mesa.numero}`)
+                resolverMesaClick(mesa)
               }
             }}
           />
@@ -514,12 +540,13 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
                 orden={mesa.orden_id ? ordenesMap[mesa.orden_id] : undefined}
                 modoJuntar={modoJuntar}
                 seleccionada={mesasSeleccionadas.includes(mesa.id)}
+                esUnida={mesasUnidasIds.has(mesa.id)}
                 onClick={() => {
                   if (modoJuntar) {
                     if (mesa.estado !== 'libre') { toast.error('Solo se pueden juntar mesas libres'); return }
                     toggleSeleccionMesa(mesa.id)
                   } else {
-                    onAbrirMesa(mesa.id, mesa.nombre || `Mesa ${mesa.numero}`)
+                    resolverMesaClick(mesa)
                   }
                 }}
               />
@@ -536,12 +563,14 @@ function MesaCard({
   orden,
   modoJuntar,
   seleccionada,
+  esUnida,
   onClick,
 }: {
   mesa: Mesa
   orden?: OrdenResumen
   modoJuntar?: boolean
   seleccionada?: boolean
+  esUnida?: boolean
   onClick: () => void
 }) {
   const ocupada = mesa.estado === 'ocupada'
@@ -626,6 +655,13 @@ function MesaCard({
           <div className="absolute top-2 right-2 w-5 h-5 flex items-center justify-center font-black text-xs"
             style={{ background: '#06b6d4', color: '#000', borderRadius: 0 }}>
             ✓
+          </div>
+        )}
+        {/* Badge mesas unidas */}
+        {esUnida && !seleccionada && (
+          <div className="absolute top-2 left-2 font-black text-xs px-1 py-0.5 leading-none"
+            style={{ background: 'rgba(6,182,212,0.15)', border: '1px solid rgba(6,182,212,0.5)', color: '#06b6d4', borderRadius: 0, fontSize: 9 }}>
+            ⊞ UNIDA
           </div>
         )}
 
@@ -843,12 +879,11 @@ function PlanoVisual({
   async function guardarNombre() {
     if (!editando || !editando.nuevoNombre.trim()) return
     setGuardando(true)
-    try {
-      await supabase.from('mesas').update({ nombre: editando.nuevoNombre.trim() }).eq('id', editando.mesa.id)
-      toast.success(`Renombrada a "${editando.nuevoNombre.trim()}"`)
-      setEditando(null)
-    } catch { toast.error('Error al renombrar') }
-    finally { setGuardando(false) }
+    const { error } = await supabase.from('mesas').update({ nombre: editando.nuevoNombre.trim() }).eq('id', editando.mesa.id)
+    setGuardando(false)
+    if (error) { toast.error('Error al renombrar: ' + error.message); return }
+    toast.success(`Renombrada a "${editando.nuevoNombre.trim()}"`)
+    setEditando(null)
   }
 
   function col(nombre: string) {

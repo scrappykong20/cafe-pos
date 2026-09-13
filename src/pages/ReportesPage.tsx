@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
-import { exportarCSV, exportarPDF } from '../services/exportar'
+import { exportarCSV, exportarPDF, escHtml } from '../services/exportar'
 
 type Periodo = 'hoy' | 'ayer' | 'semana' | 'mes'
 
@@ -47,7 +48,9 @@ function getRango(p: Periodo): { desde: string; hasta: string } {
       return { desde: ayer.toISOString(), hasta: hoy.toISOString() }
     }
     case 'semana': {
-      const inicioSemana = new Date(hoy.getTime() - hoy.getDay() * 86400000)
+      // Semana inicia el lunes (iso): (getDay()+6)%7 convierte 0=dom→6, 1=lun→0, etc.
+      const diasDesdeLunes = (hoy.getDay() + 6) % 7
+      const inicioSemana = new Date(hoy.getTime() - diasDesdeLunes * 86400000)
       return { desde: inicioSemana.toISOString(), hasta: new Date(hoy.getTime() + 86400000).toISOString() }
     }
     case 'mes': {
@@ -73,8 +76,9 @@ function getRangoAnterior(p: Periodo): { desde: string; hasta: string } {
       return { desde: anteayer.toISOString(), hasta: ayer.toISOString() }
     }
     case 'semana': {
-      // esta semana → semana pasada
-      const inicioEstaSemana = new Date(hoy.getTime() - hoy.getDay() * 86400000)
+      // esta semana → semana pasada (lunes como inicio, igual que getRango)
+      const diasDesdeLunes = (hoy.getDay() + 6) % 7
+      const inicioEstaSemana = new Date(hoy.getTime() - diasDesdeLunes * 86400000)
       const inicioSemanaPasada = new Date(inicioEstaSemana.getTime() - 7 * 86400000)
       return { desde: inicioSemanaPasada.toISOString(), hasta: inicioEstaSemana.toISOString() }
     }
@@ -111,6 +115,8 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
   const [porMetodo, setPorMetodo] = useState<MetodoPagoStats[]>([])
   const [porCajero, setPorCajero] = useState<CajeroStats[]>([])
   const [hoveredHora, setHoveredHora] = useState<number | null>(null)
+  const [canjesCount, setCanjesCount] = useState(0)
+  const [engranalesCanjeados, setEngranalesCanjeados] = useState(0)
 
   // Comparativa de períodos
   const [compararActivo, setCompararActivo] = useState(false)
@@ -122,12 +128,13 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
   async function cargarPeriodoAnterior(p: Periodo) {
     try {
       const { desde, hasta } = getRangoAnterior(p)
-      const { data: ventas } = await supabase
+      const { data: ventas, error: ventasErr } = await supabase
         .from('ventas')
         .select('total, engranajes_ganados')
         .gte('created_at', desde)
         .lt('created_at', hasta)
         .eq('estado', 'completada')
+      if (ventasErr) { console.error('Error al cargar periodo anterior:', ventasErr.message); return; }
       const v = ventas ?? []
       const totalSum = v.reduce((s: number, x: { total?: number }) => s + (x.total ?? 0), 0)
       const engranajesSum = v.reduce((s: number, x: { engranajes_ganados?: number }) => s + (x.engranajes_ganados ?? 0), 0)
@@ -141,12 +148,19 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
     setLoading(true)
     const { desde, hasta } = getRango(p)
 
-    const { data: ventas } = await supabase
+    try {
+
+    const { data: ventas, error: ventasError } = await supabase
       .from('ventas')
       .select('id, total, metodo_pago, cajero_nombre, mesa_nombre, engranajes_ganados, created_at')
       .gte('created_at', desde)
       .lt('created_at', hasta)
       .eq('estado', 'completada')
+
+    if (ventasError) {
+      toast.error('Error al cargar ventas')
+      throw ventasError
+    }
 
     const v = ventas ?? []
 
@@ -200,10 +214,11 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
 
     const ventaIds = v.map(x => x.id)
     if (ventaIds.length > 0) {
-      const { data: items } = await supabase
+      const { data: items, error: itemsErr } = await supabase
         .from('venta_items')
         .select('nombre, emoji, cantidad, subtotal')
         .in('venta_id', ventaIds)
+      if (itemsErr) { console.error('Error al cargar items de ventas:', itemsErr.message); }
 
       const prodMap = new Map<string, ProductoTop>()
       ;(items ?? []).forEach(item => {
@@ -217,7 +232,25 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
       setTopProductos([])
     }
 
-    setLoading(false)
+    // ── Canjes de recompensas del período ──
+    const { data: canjes, error: canjesError } = await supabase
+      .from('historial')
+      .select('engranajes')
+      .in('tipo', ['CANJEA', 'canje'])
+      .gte('created_at', desde)
+      .lt('created_at', hasta)
+    if (canjesError) {
+      console.error('Error cargando canjes:', canjesError.message)
+    }
+    setCanjesCount(canjes?.length ?? 0)
+    setEngranalesCanjeados((canjes ?? []).reduce((s: number, c: { engranajes?: number }) => s + (c.engranajes ?? 0), 0))
+
+    } catch (e) {
+      console.error('Error inesperado en cargarDatos:', e)
+      toast.error('Error al cargar reportes')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -305,7 +338,7 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
           ${topProductos.map((p, i) => `
             <tr>
               <td class="rank">#${i + 1}</td>
-              <td>${p.emoji} ${p.nombre}</td>
+              <td>${escHtml(p.emoji)} ${escHtml(p.nombre)}</td>
               <td>${p.cantidad} pcs</td>
               <td class="total-cell">${fmt(p.total)}</td>
             </tr>`).join('')}
@@ -320,7 +353,7 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
           ${porCajero.map((c, i) => `
             <tr>
               <td class="rank">#${i + 1}</td>
-              <td>${c.cajero_nombre}</td>
+              <td>${escHtml(c.cajero_nombre)}</td>
               <td>${c.count}</td>
               <td class="total-cell">${fmt(c.total)}</td>
             </tr>`).join('')}
@@ -450,6 +483,22 @@ export default function ReportesPage({ cajero: _cajero, onVolver }: { cajero: Ca
                   <div style={styles.statValue}>{resumen.engranajes}</div>
                   <div style={styles.statLabel}>ENGRANAJES OTORGADOS</div>
                   {renderDelta(resumen.engranajes, resumenAnterior?.engranajes)}
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={styles.statCardIconRow}>
+                    <span style={styles.statIcon}>🎁</span>
+                  </div>
+                  <div style={styles.statValue}>{canjesCount}</div>
+                  <div style={styles.statLabel}>CANJES DE RECOMPENSA</div>
+                </div>
+
+                <div style={styles.statCard}>
+                  <div style={styles.statCardIconRow}>
+                    <span style={styles.statIcon}>🔧</span>
+                  </div>
+                  <div style={styles.statValue}>{engranalesCanjeados}</div>
+                  <div style={styles.statLabel}>ENGRANAJES CANJEADOS</div>
                 </div>
               </div>
             </section>

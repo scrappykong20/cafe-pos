@@ -131,14 +131,32 @@ export async function cancelarIntentoPago(intentoId: string): Promise<boolean> {
 
 /**
  * Cancela el intento guardado en localStorage (del uso anterior).
+ * BUG 6: Implementa hasta 3 reintentos con delay de 1s entre cada uno.
+ * Si fallan todos, limpia localStorage de todas formas para evitar quedar atascado.
  */
 export async function cancelarIntentoAtascado(): Promise<void> {
   const savedId = localStorage.getItem(MP_LAST_INTENT_KEY)
-  if (savedId) {
-    console.log('[MP] Cancelando intento atascado por ID guardado:', savedId)
-    await cancelarIntentoPago(savedId).catch(() => {})
-    limpiarUltimoIntento()
+  if (!savedId) return
+
+  // No loguear el ID del intento en producción para evitar exposición de datos de transacción
+  const MAX_REINTENTOS = 3
+  let exito = false
+  for (let intento = 1; intento <= MAX_REINTENTOS; intento++) {
+    try {
+      const ok = await cancelarIntentoPago(savedId)
+      if (ok) { exito = true; break }
+    } catch {
+      // error de red — reintentar
+    }
+    if (intento < MAX_REINTENTOS) {
+      await new Promise(r => setTimeout(r, 1000))
+    }
   }
+  if (!exito) {
+    console.warn('[MP] No se pudo cancelar el intento atascado después de', MAX_REINTENTOS, 'intentos — limpiando localStorage de todas formas')
+  }
+  // Siempre limpiar para no quedar atascado
+  limpiarUltimoIntento()
 }
 
 // ── Liberar terminal (reset de modo) ─────────────────────────────────────────
@@ -152,7 +170,7 @@ async function setModoDispositivo(modo: 'PDV' | 'STANDALONE'): Promise<void> {
       body: JSON.stringify({ operating_mode: modo }),
     },
   )
-  console.log('[MP] setModo', modo, '→ status:', res.status)
+  if (!res.ok) console.warn('[MP] setModo', modo, '→ error:', res.status)
 }
 
 /**
@@ -160,13 +178,11 @@ async function setModoDispositivo(modo: 'PDV' | 'STANDALONE'): Promise<void> {
  * Cancela cualquier intent atascado aunque no conozcamos su ID.
  */
 export async function liberarTerminal(): Promise<void> {
-  console.log('[MP] Liberando terminal...')
   await setModoDispositivo('STANDALONE')
   await new Promise(r => setTimeout(r, 2000))
   await setModoDispositivo('PDV')
   await new Promise(r => setTimeout(r, 1500))
   limpiarUltimoIntento()
-  console.log('[MP] Terminal liberada')
 }
 
 // ── Pago final ───────────────────────────────────────────────────────────────

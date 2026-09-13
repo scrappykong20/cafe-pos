@@ -156,6 +156,7 @@ export default function ReservacionesPage({ cajero: _cajero, onClose }: Props) {
   }, [cargarReservaciones])
 
   async function guardarReservacion() {
+    if (savingForm) return
     if (!form.cliente_nombre.trim()) {
       toast.error('El nombre del cliente es requerido')
       return
@@ -172,24 +173,32 @@ export default function ReservacionesPage({ cajero: _cajero, onClose }: Props) {
       }
     }
 
+    // Bloquear doble submit antes de la consulta de conflicto
+    setSavingForm(true)
+
     // Validar conflicto de horario si hay mesa seleccionada
     if (form.mesa_id) {
-      const { data: conflicto } = await supabase
+      const { data: conflicto, error: conflictoError } = await supabase
         .from('reservaciones')
         .select('id')
         .eq('mesa_id', form.mesa_id)
         .eq('fecha', form.fecha)
         .eq('hora', form.hora)
-        .not('estado', 'in', '("cancelada","completada")')
+        .not('estado', 'in', '(cancelada,completada)')
         .maybeSingle()
+
+      if (conflictoError) {
+        toast.error('Error al verificar disponibilidad')
+        setSavingForm(false)
+        return
+      }
 
       if (conflicto) {
         toast.error('Ya hay una reservación para esa mesa en ese horario')
+        setSavingForm(false)
         return
       }
     }
-
-    setSavingForm(true)
     try {
       const mesaObj = mesas.find(m => m.id === form.mesa_id)
       const { error } = await supabase.from('reservaciones').insert({
@@ -222,7 +231,8 @@ export default function ReservacionesPage({ cajero: _cajero, onClose }: Props) {
         const tel = form.telefono.replace(/\D/g, '')
         const fechaFmt = new Date(form.fecha + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })
         const msg = `¡Hola ${form.cliente_nombre}! Tu reservación en El Café del Constructor está confirmada para el ${fechaFmt} a las ${form.hora} (${form.personas} persona${form.personas !== 1 ? 's' : ''}). ¡Te esperamos!`
-        const waUrl = `https://wa.me/52${tel}?text=${encodeURIComponent(msg)}`
+        const telLimpio = tel.replace(/^\+?52/, '').replace(/\D/g, '')
+        const waUrl = `https://wa.me/52${telLimpio}?text=${encodeURIComponent(msg)}`
         const abrirWa = window.confirm(`¿Enviar confirmación por WhatsApp a ${form.telefono}?`)
         if (abrirWa) window.open(waUrl, '_blank')
       }

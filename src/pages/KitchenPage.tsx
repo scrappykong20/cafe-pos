@@ -129,31 +129,35 @@ export default function KitchenPage({ cajero, onVolver }: Props) {
   const [ordenes, setOrdenes] = useState<Orden[]>([])
   const [loading, setLoading] = useState(true)
   const [ahora, setAhora] = useState(new Date())
-  const [alertadas, setAlertadas] = useState<Set<string>>(new Set())
   const [filtro, setFiltro] = useState<'todas' | 'urgentes'>('todas')
   const [vista, setVista] = useState<'todas' | 'dividida'>('todas')
   const [showMerma, setShowMerma] = useState(false)
+  const [procesandoId, setProcesandoId] = useState<string | null>(null)
   const prevOrdenesRef = useRef<Set<string>>(new Set())
+  // Ref para que el intervalo siempre lea el set actualizado sin closure stale
+  const alertadasRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     cargarOrdenes()
     const iv = setInterval(() => {
       setAhora(new Date())
-      // Revisar órdenes urgentes cada 30s
+      // Revisar órdenes urgentes cada 30s usando ref para evitar closure stale
       setOrdenes(prev => {
         prev.forEach(o => {
           const mins = minutosTranscurridos(o.created_at)
-          if (mins >= 10 && !alertadas.has(o.id)) {
+          if (mins >= 10 && !alertadasRef.current.has(o.id)) {
             playAlertSound(o.tipo ?? undefined)
-            setAlertadas(a => new Set([...a, o.id]))
+            alertadasRef.current = new Set([...alertadasRef.current, o.id])
           }
         })
         return prev
       })
     }, 30000)
 
+    // Usar nombre de canal único para evitar colisión si el componente se desmonta y remonta
+    const canalId = `kitchen-rt-${Date.now()}`
     const canal = supabase
-      .channel('kitchen-rt')
+      .channel(canalId)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ordenes' }, () => cargarOrdenes())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orden_items' }, () => cargarOrdenes())
       .subscribe()
@@ -168,54 +172,79 @@ export default function KitchenPage({ cajero, onVolver }: Props) {
   }, [ordenes])
 
   async function cargarOrdenes() {
-    const { data } = await supabase
-      .from('ordenes')
-      .select('id, mesa_nombre, cajero_nombre, created_at, estado, tipo, numero_diario, orden_items(id, nombre, emoji, cantidad, notas, menu_id)')
-      .in('estado', ['abierta', 'lista'])
-      .order('created_at', { ascending: true })
+    try {
+      const { data, error } = await supabase
+        .from('ordenes')
+        .select('id, mesa_nombre, cajero_nombre, created_at, estado, tipo, numero_diario, orden_items(id, nombre, emoji, cantidad, notas, menu_id)')
+        .in('estado', ['abierta', 'lista'])
+        .order('created_at', { ascending: true })
 
-    const nuevas = (data as Orden[]) ?? []
+      if (error) { console.error('Error al cargar órdenes:', error.message); return; }
 
-    // Detectar órdenes recién llegadas (nuevas que no estaban antes)
-    const idsActuales = new Set(nuevas.map(o => o.id))
-    const idsAnteriores = prevOrdenesRef.current
-    if (idsAnteriores.size > 0) {
-      nuevas.forEach(o => {
-        if (!idsAnteriores.has(o.id)) {
-          playAlertSound(o.tipo ?? undefined)
-        }
-      })
+      const nuevas = (data as Orden[]) ?? []
+
+      // Detectar órdenes recién llegadas (nuevas que no estaban antes)
+      const idsActuales = new Set(nuevas.map(o => o.id))
+      const idsAnteriores = prevOrdenesRef.current
+      if (idsAnteriores.size > 0) {
+        nuevas.forEach(o => {
+          if (!idsAnteriores.has(o.id)) {
+            playAlertSound(o.tipo ?? undefined)
+          }
+        })
+      }
+      prevOrdenesRef.current = idsActuales
+
+      setOrdenes(nuevas)
+    } catch {
+      // error de red — mantener lista actual
+    } finally {
+      setLoading(false)
     }
-    prevOrdenesRef.current = idsActuales
-
-    setOrdenes(nuevas)
-    setLoading(false)
   }
 
   async function marcarLista(ordenId: string) {
-    const { error } = await supabase.from('ordenes').update({ estado: 'lista' }).eq('id', ordenId)
-    if (error) {
-      toast.error('Error al actualizar orden')
-    } else {
-      toast.success('Orden lista')
+    if (procesandoId) return;
+    setProcesandoId(ordenId)
+    try {
+      const { error } = await supabase.from('ordenes').update({ estado: 'lista' }).eq('id', ordenId)
+      if (error) {
+        toast.error('Error al actualizar orden')
+      } else {
+        toast.success('Orden lista')
+      }
+    } finally {
+      setProcesandoId(null)
     }
   }
 
   async function marcarEntregada(ordenId: string) {
-    const { error } = await supabase.from('ordenes').update({ estado: 'entregada', cerrada_at: new Date().toISOString() }).eq('id', ordenId)
-    if (error) {
-      toast.error('Error al actualizar orden')
-    } else {
-      toast.success('Orden entregada')
+    if (procesandoId) return;
+    setProcesandoId(ordenId)
+    try {
+      const { error } = await supabase.from('ordenes').update({ estado: 'entregada', cerrada_at: new Date().toISOString() }).eq('id', ordenId)
+      if (error) {
+        toast.error('Error al actualizar orden')
+      } else {
+        toast.success('Orden entregada')
+      }
+    } finally {
+      setProcesandoId(null)
     }
   }
 
   async function devolverACocina(ordenId: string) {
-    const { error } = await supabase.from('ordenes').update({ estado: 'abierta' }).eq('id', ordenId)
-    if (error) {
-      toast.error('Error al actualizar orden')
-    } else {
-      toast.success('Orden devuelta a cocina')
+    if (procesandoId) return;
+    setProcesandoId(ordenId)
+    try {
+      const { error } = await supabase.from('ordenes').update({ estado: 'abierta' }).eq('id', ordenId)
+      if (error) {
+        toast.error('Error al actualizar orden')
+      } else {
+        toast.success('Orden devuelta a cocina')
+      }
+    } finally {
+      setProcesandoId(null)
     }
   }
 

@@ -6,7 +6,7 @@ import toast from 'react-hot-toast'
 
 interface Props { cajero: CajeroActivo; onVolver: () => void }
 
-interface Empleado { id: string; nombre: string; apellido: string; tipo: string }
+interface Empleado { id: string; nombre: string; apellido: string; tipo: string; rol?: string }
 interface Adelanto {
   id: string
   empleado_id: string
@@ -41,60 +41,79 @@ export default function AdelantosPage({ cajero, onVolver }: Props) {
 
   // Confirmación pago inline
   const [confirmPago, setConfirmPago] = useState<string | null>(null)
+  const [procesando, setProcesando] = useState(false)
 
   const cargar = useCallback(async () => {
     setLoading(true)
-    const [empRes, adelRes] = await Promise.all([
-      supabase.from('empleados').select('id, nombre, apellido, tipo').eq('activo', true).order('nombre'),
-      supabase.from('adelantos').select('*').order('created_at', { ascending: false }).limit(50),
-    ])
-    const emps = (empRes.data ?? []) as Empleado[]
-    const adels = (adelRes.data ?? []) as Adelanto[]
-    setEmpleados(emps)
-    // Agregar nombre de empleado a cada adelanto
-    setAdelantos(adels.map(a => {
-      const emp = emps.find(e => e.id === a.empleado_id)
-      return { ...a, emp_nombre: emp ? `${emp.nombre} ${emp.apellido}` : 'Desconocido' }
-    }))
-    setLoading(false)
+    try {
+      const [empRes, adelRes] = await Promise.all([
+        supabase.from('personal').select('id, nombre, apellido, rol').eq('activo', true).order('nombre'),
+        supabase.from('adelantos').select('*').order('created_at', { ascending: false }).limit(50),
+      ])
+      if (empRes.error) { toast.error('Error al cargar empleados'); return; }
+      if (adelRes.error) { toast.error('Error al cargar adelantos'); return; }
+      const emps = ((empRes.data ?? []) as any[]).map(e => ({ ...e, tipo: e.rol ?? e.tipo ?? 'otro' })) as Empleado[]
+      const adels = (adelRes.data ?? []) as Adelanto[]
+      setEmpleados(emps)
+      setAdelantos(adels.map(a => {
+        const emp = emps.find(e => e.id === a.empleado_id)
+        return { ...a, emp_nombre: emp ? `${emp.nombre} ${emp.apellido}` : 'Desconocido' }
+      }))
+    } catch {
+      toast.error('Error de conexión al cargar adelantos')
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => { cargar() }, [cargar])
 
   async function registrar() {
+    if (guardando) return;
     if (!empId) { toast.error('Selecciona un empleado'); return }
     const montoNum = parseFloat(monto)
     if (isNaN(montoNum) || montoNum <= 0) { toast.error('Monto inválido'); return }
 
     setGuardando(true)
-    const { error } = await supabase.from('adelantos').insert({
-      empleado_id: empId,
-      monto: montoNum,
-      concepto: concepto.trim() || null,
-      fecha,
-      registrado_por: `${cajero.nombre} ${cajero.last_name}`,
-      pagado: false,
-    })
-    if (error) {
-      toast.error('Error al registrar: ' + error.message)
-    } else {
-      toast.success(`✅ Adelanto de ${fmt(montoNum)} registrado`)
-      setMonto('')
-      setConcepto('')
-      setEmpId('')
-      cargar()
+    try {
+      const { error } = await supabase.from('adelantos').insert({
+        empleado_id: empId,
+        monto: montoNum,
+        concepto: concepto.trim() || null,
+        fecha,
+        registrado_por: `${cajero.nombre} ${cajero.last_name}`,
+        pagado: false,
+      })
+      if (error) {
+        toast.error('Error al registrar: ' + error.message)
+      } else {
+        toast.success(`✅ Adelanto de ${fmt(montoNum)} registrado`)
+        setMonto('')
+        setConcepto('')
+        setEmpId('')
+        cargar()
+      }
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
+      setGuardando(false)
     }
-    setGuardando(false)
   }
 
   async function marcarPagado(id: string) {
-    const { error } = await supabase.from('adelantos')
-      .update({ pagado: true, pagado_at: new Date().toISOString() })
-      .eq('id', id)
-    if (error) { toast.error('Error al actualizar'); return }
-    toast.success('Marcado como pagado')
-    setConfirmPago(null)
-    cargar()
+    if (procesando) return;
+    setProcesando(true)
+    setConfirmPago(null)   // cerrar inmediatamente para evitar doble submit
+    try {
+      const { error } = await supabase.from('adelantos')
+        .update({ pagado: true, pagado_at: new Date().toISOString() })
+        .eq('id', id)
+      if (error) { toast.error('Error al actualizar'); return }
+      toast.success('Marcado como pagado')
+      cargar()
+    } finally {
+      setProcesando(false)
+    }
   }
 
   const totalSemana = adelantos.filter(a => !a.pagado).reduce((s, a) => s + Number(a.monto), 0)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../supabase'
 import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
@@ -24,6 +24,7 @@ interface DeliveryOrden {
   notas: string | null
   numero_diario: number | null
   usuario_id: string | null
+  estado_entrega: string | null
   orden_items: DeliveryItem[]
 }
 
@@ -73,14 +74,29 @@ export default function DeliveryAlerts({ cajero }: Props) {
   const [procesando, setProcesando] = useState(false)
   const prevCount = useRef(0)
 
+  const cargar = useCallback(async () => {
+    const campos = `
+      id, created_at, mesa_nombre, cliente_nombre, cliente_telefono,
+      direccion_entrega, tipo_entrega, notas, numero_diario, usuario_id, estado_entrega,
+      orden_items(id, nombre, emoji, cantidad, precio, notas)
+    `
+    const [pendRes, activaRes] = await Promise.all([
+      supabase.from('ordenes').select(campos).eq('canal', 'delivery').eq('estado', 'pendiente').order('created_at', { ascending: true }),
+      supabase.from('ordenes').select(campos).eq('canal', 'delivery').eq('estado', 'abierta').order('created_at', { ascending: true }),
+    ])
+    if (pendRes.error) { console.error('Error al cargar pedidos pendientes:', pendRes.error.message); }
+    if (activaRes.error) { console.error('Error al cargar pedidos activos:', activaRes.error.message); }
+    setPendientes(!pendRes.error ? ((pendRes.data as DeliveryOrden[]) ?? []) : [])
+    setActivas(!activaRes.error ? ((activaRes.data as DeliveryOrden[]) ?? []) : [])
+  }, [])
+
   useEffect(() => {
     cargar()
-    // Escuchar cambios en ordenes (cualquier cambio, filtramos en query)
     const ch = supabase.channel('delivery-watch')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ordenes' }, cargar)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-  }, [])
+  }, [cargar])
 
   useEffect(() => {
     if (pendientes.length > prevCount.current) {
@@ -92,20 +108,6 @@ export default function DeliveryAlerts({ cajero }: Props) {
     }
     prevCount.current = pendientes.length
   }, [pendientes.length])
-
-  async function cargar() {
-    const campos = `
-      id, created_at, mesa_nombre, cliente_nombre, cliente_telefono,
-      direccion_entrega, tipo_entrega, notas, numero_diario, usuario_id,
-      orden_items(id, nombre, emoji, cantidad, precio, notas)
-    `
-    const [pendRes, activaRes] = await Promise.all([
-      supabase.from('ordenes').select(campos).eq('canal', 'delivery').eq('estado', 'pendiente').order('created_at', { ascending: true }),
-      supabase.from('ordenes').select(campos).eq('canal', 'delivery').eq('estado', 'abierta').order('created_at', { ascending: true }),
-    ])
-    setPendientes((pendRes.data as DeliveryOrden[]) ?? [])
-    setActivas((activaRes.data as DeliveryOrden[]) ?? [])
-  }
 
   function sonarAlertas() {
     try {
@@ -126,12 +128,14 @@ export default function DeliveryAlerts({ cajero }: Props) {
   }
 
   async function aceptar(orden: DeliveryOrden) {
+    if (procesando) return;
     setProcesando(true)
     try {
       const { error } = await supabase
         .from('ordenes')
         .update({
           estado: 'abierta',
+          estado_entrega: 'asignado',
           cajero_id: cajero.id,
           cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
         })
@@ -178,9 +182,11 @@ export default function DeliveryAlerts({ cajero }: Props) {
   }
 
   async function rechazar(orden: DeliveryOrden) {
+    if (procesando) return;
     setProcesando(true)
     try {
-      await supabase.from('ordenes').update({ estado: 'cancelada' }).eq('id', orden.id)
+      const { error } = await supabase.from('ordenes').update({ estado: 'cancelada' }).eq('id', orden.id)
+      if (error) throw error
       toast('Pedido rechazado', { icon: '❌' })
 
       // Notificación push al cliente
@@ -200,25 +206,58 @@ export default function DeliveryAlerts({ cajero }: Props) {
     }
   }
 
-  async function marcarEnCamino(orden: DeliveryOrden) {
+  async function marcarListo(orden: DeliveryOrden) {
+    if (procesando) return;
     setProcesando(true)
     try {
-      await supabase.from('ordenes').update({ estado: 'pagada' }).eq('id', orden.id)
-      toast.success(`🛵 Orden de ${orden.cliente_nombre} marcada en camino`)
+      const { error } = await supabase.from('ordenes').update({
+        estado_entrega: 'listo',
+      }).eq('id', orden.id)
+      if (error) throw error
 
-      // Notificación push al cliente
+      const esEntrega = orden.tipo_entrega === 'domicilio'
+      toast.success(esEntrega
+        ? `📦 Orden de ${orden.cliente_nombre} lista — esperando repartidor`
+        : `✅ Orden de ${orden.cliente_nombre} lista para recoger`)
+
       const ref = orden.numero_diario ? `#${orden.numero_diario}` : ''
       enviarNotificacionPush(
         orden.usuario_id,
-        orden.tipo_entrega === 'domicilio' ? '¡Tu pedido va en camino! 🛵' : '¡Tu pedido está listo! 🏪',
-        orden.tipo_entrega === 'domicilio'
-          ? `Tu pedido ${ref} está en camino. ¡Prepárate para recibirlo!`
+        esEntrega ? '¡Tu pedido está listo! 📦' : '¡Tu pedido está listo! 🏪',
+        esEntrega
+          ? `Tu pedido ${ref} está listo y buscamos a tu repartidor. ¡Ya casi llega!`
           : `Tu pedido ${ref} está listo. Pasa a recogerlo en el café.`,
       )
 
       cargar()
     } catch {
       toast.error('Error al actualizar')
+    } finally {
+      setProcesando(false)
+    }
+  }
+
+  async function confirmarEntrega(orden: DeliveryOrden) {
+    if (procesando) return;
+    setProcesando(true)
+    try {
+      const { error } = await supabase.from('ordenes').update({
+        estado: 'pagada',
+        estado_entrega: 'entregado',
+      }).eq('id', orden.id)
+      if (error) throw error
+      toast.success(`✅ Entrega confirmada — ${orden.cliente_nombre}`)
+
+      const ref = orden.numero_diario ? `#${orden.numero_diario}` : ''
+      enviarNotificacionPush(
+        orden.usuario_id,
+        '¡Pedido entregado! ☕',
+        `Tu pedido ${ref} ha sido entregado. ¡Gracias por tu compra!`,
+      )
+
+      cargar()
+    } catch {
+      toast.error('Error al confirmar entrega')
     } finally {
       setProcesando(false)
     }
@@ -304,36 +343,98 @@ export default function DeliveryAlerts({ cajero }: Props) {
             {/* Lista */}
             <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
 
-              {/* Sección activas (en preparación) */}
+              {/* Sección activas (en preparación / en camino) */}
               {activas.length > 0 && (
                 <>
                   <p style={{ color: '#F0A800', fontSize: 10, fontWeight: 900, textTransform: 'uppercase', letterSpacing: 2, margin: '4px 0 6px' }}>
-                    ⏳ En preparación ({activas.length})
+                    ⏳ En proceso ({activas.length})
                   </p>
-                  {activas.map(o => (
-                    <div key={o.id} style={{ background: 'var(--dark)', border: '1px solid var(--border)', borderLeft: '4px solid #F0A800', padding: '12px 14px' }}>
+                  {activas.map(o => {
+                    const ee = o.estado_entrega
+                    const esListo    = ee === 'listo'
+                    const esEnCamino = ee === 'en_camino'
+                    const esEntregado = ee === 'entregado'
+                    const esDomicilio = o.tipo_entrega === 'domicilio'
+
+                    // Color del borde según estado
+                    const borderColor = esEntregado ? '#22c55e'
+                      : esEnCamino ? '#3b82f6'
+                      : esListo ? (esDomicilio ? '#f97316' : '#22c55e')
+                      : '#F0A800'
+
+                    // Etiqueta de estado
+                    const estadoLabel = esEntregado ? '✅ Entregado'
+                      : esEnCamino ? '🛵 En camino con repartidor'
+                      : esListo && esDomicilio ? '📦 Listo · Esperando repartidor'
+                      : esListo && !esDomicilio ? '🏪 Listo para recoger'
+                      : '🍳 En preparación'
+
+                    const estadoColor = esEntregado ? '#22c55e'
+                      : esEnCamino ? '#3b82f6'
+                      : esListo ? (esDomicilio ? '#f97316' : '#22c55e')
+                      : '#fbbf24'
+
+                    return (
+                    <div key={o.id} style={{ background: 'var(--dark)', border: '1px solid var(--border)', borderLeft: `4px solid ${borderColor}`, padding: '12px 14px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
                         <div>
                           <p style={{ color: 'var(--text)', fontWeight: 900, fontSize: 13, margin: 0 }}>{o.cliente_nombre}</p>
-                          <p style={{ color: o.tipo_entrega === 'domicilio' ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: 900, margin: '2px 0 0' }}>
-                            {o.tipo_entrega === 'domicilio' ? '🛵 Domicilio' : '🏪 Recoger'}
+                          <p style={{ color: esDomicilio ? '#ef4444' : '#22c55e', fontSize: 11, fontWeight: 900, margin: '2px 0 0' }}>
+                            {esDomicilio ? '🛵 Domicilio' : '🏪 Recoger'}
+                          </p>
+                          <p style={{ color: estadoColor, fontSize: 10, fontWeight: 900, margin: '3px 0 0' }}>
+                            {estadoLabel}
                           </p>
                         </div>
                         <span style={{ color: 'var(--yellow)', fontWeight: 900, fontSize: 14 }}>${totalOrden(o).toFixed(2)}</span>
                       </div>
-                      <button
-                        onClick={() => marcarEnCamino(o)}
-                        disabled={procesando}
-                        style={{
-                          width: '100%', padding: '10px', background: '#F0A800', color: '#000',
-                          fontWeight: 900, fontSize: 12, textTransform: 'uppercase',
-                          border: 'none', cursor: procesando ? 'not-allowed' : 'pointer',
-                          letterSpacing: 1, fontFamily: 'monospace', opacity: procesando ? 0.5 : 1,
-                        }}>
-                        {o.tipo_entrega === 'domicilio' ? '🛵 Marcar en camino' : '✅ Marcar como listo'}
-                      </button>
+
+                      {/* Botón: solo cuando está en preparación → marcar listo */}
+                      {!esListo && !esEnCamino && !esEntregado && (
+                        <button
+                          onClick={() => marcarListo(o)}
+                          disabled={procesando}
+                          style={{
+                            width: '100%', padding: '10px', background: '#F0A800', color: '#000',
+                            fontWeight: 900, fontSize: 12, textTransform: 'uppercase',
+                            border: 'none', cursor: procesando ? 'not-allowed' : 'pointer',
+                            letterSpacing: 1, fontFamily: 'monospace', opacity: procesando ? 0.5 : 1,
+                          }}>
+                          {esDomicilio ? '📦 Listo para enviar' : '✅ Marcar como listo'}
+                        </button>
+                      )}
+
+                      {/* Botón: recoger listo → confirmar recogida */}
+                      {esListo && !esDomicilio && (
+                        <button
+                          onClick={() => confirmarEntrega(o)}
+                          disabled={procesando}
+                          style={{
+                            width: '100%', padding: '10px', background: '#22c55e', color: '#000',
+                            fontWeight: 900, fontSize: 12, textTransform: 'uppercase',
+                            border: 'none', cursor: procesando ? 'not-allowed' : 'pointer',
+                            letterSpacing: 1, fontFamily: 'monospace', opacity: procesando ? 0.5 : 1,
+                          }}>
+                          🏪 Confirmar recogida
+                        </button>
+                      )}
+
+                      {/* Domicilio listo: espera al repartidor — sin botón */}
+                      {esListo && esDomicilio && (
+                        <div style={{ padding: '8px', background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.3)', textAlign: 'center' }}>
+                          <p style={{ color: '#f97316', fontSize: 11, fontWeight: 900, margin: 0 }}>⏳ El repartidor tomará el pedido desde su app</p>
+                        </div>
+                      )}
+
+                      {/* Domicilio en camino — sin botón, el repartidor confirma la entrega */}
+                      {esEnCamino && (
+                        <div style={{ padding: '8px', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.3)', textAlign: 'center' }}>
+                          <p style={{ color: '#3b82f6', fontSize: 11, fontWeight: 900, margin: 0 }}>🛵 Repartidor en camino · Entrega desde la app</p>
+                        </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                   {pendientes.length > 0 && (
                     <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '4px 0' }} />
                   )}

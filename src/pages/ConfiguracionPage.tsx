@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 import {
   getSlot, setSlot, type PrinterSlot, hayImpresora,
@@ -125,16 +126,21 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
 
   async function detectarImpresoras() {
     setDetectando(true)
-    const lista = await listarImpresoras()
-    setImpresoras(lista)
-    setDetectando(false)
-    // Auto-asignar primera Epson al slot vacío si no hay ninguno configurado
-    if (!hayImpresora('caja') && lista.length > 0) {
-      const epson = lista.find(p => p.toLowerCase().includes('tm-t') || p.toLowerCase().includes('receipt'))
-      if (epson) {
-        const s1 = getSlot(1)
-        if (!s1.nombre && !s1.ip) updateSlot(1, { tipo: 'caja', modo: 'cable', nombre: epson })
+    try {
+      const lista = await listarImpresoras()
+      setImpresoras(lista)
+      // Auto-asignar primera Epson al slot vacío si no hay ninguno configurado
+      if (!hayImpresora('caja') && lista.length > 0) {
+        const epson = lista.find(p => p.toLowerCase().includes('tm-t') || p.toLowerCase().includes('receipt'))
+        if (epson) {
+          const s1 = getSlot(1)
+          if (!s1.nombre && !s1.ip) updateSlot(1, { tipo: 'caja', modo: 'cable', nombre: epson })
+        }
       }
+    } catch {
+      // error al listar impresoras
+    } finally {
+      setDetectando(false)
     }
   }
 
@@ -194,7 +200,7 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
       setConfig(map)
       setLocalEdits(map)
     } catch {
-      // silent — will show empty inputs
+      toast.error('Error al cargar configuración — revisa la conexión')
     } finally {
       setLoading(false)
     }
@@ -202,13 +208,23 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
 
   async function cargarPersonal() {
     setLoadingPersonal(true)
-    const { data } = await supabase.from('personal').select('id, nombre, apellido, rol, pin, activo, fecha_nacimiento, sueldo_semana, porcentaje_propina').order('nombre')
-    setPersonalList((data as any[]) ?? [])
-    setLoadingPersonal(false)
+    try {
+      const { data, error } = await supabase.from('personal').select('id, nombre, apellido, rol, pin, activo, fecha_nacimiento, sueldo_semana, porcentaje_propina').order('nombre')
+      if (error) { toast.error('Error cargando personal'); return }
+      setPersonalList((data as any[]) ?? [])
+    } finally {
+      setLoadingPersonal(false)
+    }
   }
 
   async function guardarPersonal() {
+    if (savingPersonal) return
     if (!formPersonal.nombre.trim()) return
+    const pinTrim = formPersonal.pin.trim()
+    if (pinTrim !== '' && !/^\d{4}$/.test(pinTrim)) {
+      toast.error('El PIN debe tener exactamente 4 dígitos numéricos')
+      return
+    }
     setSavingPersonal(true)
     try {
       const payload = {
@@ -221,11 +237,15 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
         sueldo_semana: formPersonal.sueldo_semana !== '' ? parseFloat(formPersonal.sueldo_semana) : null,
         porcentaje_propina: formPersonal.porcentaje_propina !== '' ? parseFloat(formPersonal.porcentaje_propina) : 0,
       }
+      let opError
       if (editingPersonal) {
-        await supabase.from('personal').update(payload).eq('id', editingPersonal)
+        const { error } = await supabase.from('personal').update(payload).eq('id', editingPersonal)
+        opError = error
       } else {
-        await supabase.from('personal').insert(payload)
+        const { error } = await supabase.from('personal').insert(payload)
+        opError = error
       }
+      if (opError) { toast.error('Error al guardar empleado: ' + opError.message); return }
       setShowAddPersonal(false)
       setEditingPersonal(null)
       setFormPersonal({ nombre: '', apellido: '', rol: 'cajero', pin: '', activo: true, fecha_nacimiento: '', sueldo_semana: '', porcentaje_propina: '70' })
@@ -236,7 +256,8 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
   }
 
   async function toggleActivo(id: string, activo: boolean) {
-    await supabase.from('personal').update({ activo: !activo }).eq('id', id)
+    const { error } = await supabase.from('personal').update({ activo: !activo }).eq('id', id)
+    if (error) { toast.error('Error al actualizar empleado'); return }
     await cargarPersonal()
   }
 

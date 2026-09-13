@@ -58,36 +58,38 @@ export default function ModificadoresAdminPage({ cajero, onVolver }: Props) {
 
   async function cargar() {
     setLoading(true)
-    const { data: gData, error: gError } = await supabase
-      .from('modificadores_grupo')
-      .select('*')
-      .order('orden', { ascending: true })
+    try {
+      const { data: gData, error: gError } = await supabase
+        .from('modificadores_grupo')
+        .select('*')
+        .order('orden', { ascending: true })
 
-    if (gError) {
-      if ((gError as any).code === '42P01') {
-        setTablaNoExiste(true)
-        setLoading(false)
+      if (gError) {
+        if ((gError as any).code === '42P01') {
+          setTablaNoExiste(true)
+          return
+        }
+        toast.error('Error cargando grupos')
         return
       }
-      toast.error('Error cargando grupos')
+
+      const { data: oData, error: oError } = await supabase
+        .from('modificadores_opcion')
+        .select('*')
+        .order('orden', { ascending: true })
+
+      if (oError && (oError as any).code === '42P01') {
+        setTablaNoExiste(true)
+        return
+      }
+
+      setGrupos((gData as Grupo[]) ?? [])
+      setOpciones((oData as Opcion[]) ?? [])
+    } catch {
+      toast.error('Error de conexión')
+    } finally {
       setLoading(false)
-      return
     }
-
-    const { data: oData, error: oError } = await supabase
-      .from('modificadores_opcion')
-      .select('*')
-      .order('orden', { ascending: true })
-
-    if (oError && (oError as any).code === '42P01') {
-      setTablaNoExiste(true)
-      setLoading(false)
-      return
-    }
-
-    setGrupos((gData as Grupo[]) ?? [])
-    setOpciones((oData as Opcion[]) ?? [])
-    setLoading(false)
   }
 
   function toggleExpandir(id: string) {
@@ -104,25 +106,32 @@ export default function ModificadoresAdminPage({ cajero, onVolver }: Props) {
     if (!cajero.es_admin) { toast.error('Solo admins pueden crear grupos'); return }
     if (!gNombre.trim()) return
     setGuardandoGrupo(true)
-    const { error } = await supabase.from('modificadores_grupo').insert({
-      nombre: gNombre.trim(),
-      requerido: gRequerido,
-      min_seleccion: parseInt(gMin) || 0,
-      max_seleccion: parseInt(gMax) || 1,
-      orden: grupos.length,
-    })
-    setGuardandoGrupo(false)
-    if (error) { toast.error('Error al crear grupo'); return }
-    setGNombre(''); setGRequerido(false); setGMin('0'); setGMax('1')
-    setShowNuevoGrupo(false)
-    cargar()
+    try {
+      const { error } = await supabase.from('modificadores_grupo').insert({
+        nombre: gNombre.trim(),
+        requerido: gRequerido,
+        min_seleccion: parseInt(gMin) || 0,
+        max_seleccion: parseInt(gMax) || 1,
+        orden: grupos.length,
+      })
+      if (error) { toast.error('Error al crear grupo'); return }
+      setGNombre(''); setGRequerido(false); setGMin('0'); setGMax('1')
+      setShowNuevoGrupo(false)
+      cargar()
+    } catch {
+      toast.error('Error de conexión')
+    } finally {
+      setGuardandoGrupo(false)
+    }
   }
 
   async function eliminarGrupo(id: string) {
     if (!cajero.es_admin) { toast.error('Solo admins pueden eliminar grupos'); return }
     if (!confirm('¿Eliminar este grupo y todas sus opciones?')) return
-    await supabase.from('modificadores_opcion').delete().eq('grupo_id', id)
-    await supabase.from('modificadores_grupo').delete().eq('id', id)
+    const { error: errOpciones } = await supabase.from('modificadores_opcion').delete().eq('grupo_id', id)
+    if (errOpciones) { toast.error('Error al eliminar opciones del grupo'); return }
+    const { error: errGrupo } = await supabase.from('modificadores_grupo').delete().eq('id', id)
+    if (errGrupo) { toast.error('Error al eliminar grupo'); return }
     cargar()
   }
 
@@ -131,31 +140,38 @@ export default function ModificadoresAdminPage({ cajero, onVolver }: Props) {
     if (!cajero.es_admin) { toast.error('Solo admins pueden agregar opciones'); return }
     if (!oNombre.trim()) return
     setGuardandoOpcion(true)
-    const opcsDelGrupo = opciones.filter(o => o.grupo_id === grupoId)
-    const { error } = await supabase.from('modificadores_opcion').insert({
-      grupo_id: grupoId,
-      nombre: oNombre.trim(),
-      precio_extra: parseFloat(oPrecio) || 0,
-      disponible: oDisponible,
-      orden: opcsDelGrupo.length,
-    })
-    setGuardandoOpcion(false)
-    if (error) { toast.error('Error al crear opción'); return }
-    setONombre(''); setOPrecio('0'); setODisponible(true)
-    setShowNuevaOpcion(null)
-    cargar()
+    try {
+      const opcsDelGrupo = opciones.filter(o => o.grupo_id === grupoId)
+      const { error } = await supabase.from('modificadores_opcion').insert({
+        grupo_id: grupoId,
+        nombre: oNombre.trim(),
+        precio_extra: parseFloat(oPrecio) || 0,
+        disponible: oDisponible,
+        orden: opcsDelGrupo.length,
+      })
+      if (error) { toast.error('Error al crear opción'); return }
+      setONombre(''); setOPrecio('0'); setODisponible(true)
+      setShowNuevaOpcion(null)
+      cargar()
+    } catch {
+      toast.error('Error de conexión')
+    } finally {
+      setGuardandoOpcion(false)
+    }
   }
 
   async function toggleDisponible(opcion: Opcion) {
     if (!cajero.es_admin) return
-    await supabase.from('modificadores_opcion').update({ disponible: !opcion.disponible }).eq('id', opcion.id)
+    const { error } = await supabase.from('modificadores_opcion').update({ disponible: !opcion.disponible }).eq('id', opcion.id)
+    if (error) { toast.error('Error al cambiar disponibilidad'); return }
     cargar()
   }
 
   async function eliminarOpcion(id: string) {
     if (!cajero.es_admin) { toast.error('Solo admins pueden eliminar opciones'); return }
     if (!confirm('¿Eliminar esta opción?')) return
-    await supabase.from('modificadores_opcion').delete().eq('id', id)
+    const { error } = await supabase.from('modificadores_opcion').delete().eq('id', id)
+    if (error) { toast.error('Error al eliminar opción'); return }
     cargar()
   }
 

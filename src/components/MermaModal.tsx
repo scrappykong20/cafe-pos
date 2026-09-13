@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { supabase } from '../supabase'
 import toast from 'react-hot-toast'
 
@@ -24,6 +24,9 @@ export default function MermaModal({ cajeroNombre, onClose }: Props) {
   const [guardando, setGuardando] = useState(false)
   const [ok, setOk] = useState(false)
 
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (closeTimerRef.current) clearTimeout(closeTimerRef.current) }, [])
+
   function onFotoChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null
     setFoto(file)
@@ -41,30 +44,38 @@ export default function MermaModal({ cajeroNombre, onClose }: Props) {
     if (!ingrediente.trim() || isNaN(cant) || cant <= 0) return
     setGuardando(true)
 
-    let foto_url: string | null = null
-    if (foto) {
-      const ext = foto.name.split('.').pop() ?? 'jpg'
-      const path = `merma/${Date.now()}.${ext}`
-      const { data: upData } = await supabase.storage
-        .from('merma-fotos')
-        .upload(path, foto, { upsert: false })
-      if (upData) {
-        const { data: urlData } = supabase.storage.from('merma-fotos').getPublicUrl(path)
-        foto_url = urlData.publicUrl
+    try {
+      let foto_url: string | null = null
+      if (foto) {
+        const ext = foto.name.split('.').pop() ?? 'jpg'
+        const path = `merma/${Date.now()}.${ext}`
+        const { data: upData, error: uploadError } = await supabase.storage
+          .from('merma-fotos')
+          .upload(path, foto, { upsert: false })
+        if (uploadError) {
+          toast.error('Error al subir foto: ' + uploadError.message)
+        } else if (upData) {
+          const { data: urlData } = supabase.storage.from('merma-fotos').getPublicUrl(path)
+          foto_url = urlData.publicUrl
+        }
       }
-    }
 
-    const { error } = await supabase.from('merma').insert({
-      ingrediente_nombre: ingrediente.trim(),
-      cantidad: cant, unidad, motivo,
-      cajero_nombre: cajeroNombre,
-      notas: notas.trim() || null,
-      ...(foto_url ? { foto_url } : {}),
-    })
-    if (error) { toast.error('Error al registrar merma'); return }
-    setOk(true)
-    setGuardando(false)
-    setTimeout(onClose, 2000)
+      const { error } = await supabase.from('merma').insert({
+        ingrediente_nombre: ingrediente.trim(),
+        cantidad: cant, unidad, motivo,
+        cajero_nombre: cajeroNombre,
+        notas: notas.trim() || null,
+        ...(foto_url ? { foto_url } : {}),
+      })
+      if (error) { toast.error('Error al registrar merma'); return }
+      setOk(true)
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = setTimeout(onClose, 2000)
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
+      setGuardando(false)
+    }
   }
 
   return (

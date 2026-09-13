@@ -26,9 +26,25 @@ export default function AperturaCajaPage({ cajero, onAperturado, onSalir }: Prop
   }, 0)
 
   async function confirmarApertura() {
+    if (abriendo) return
     if (totalFondo < 0) return
     setAbriendo(true)
     try {
+      // Verificar que no haya ya una caja abierta hoy (de cualquier cajero)
+      const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
+      const { data: yaAbierto } = await supabase
+        .from('cortes_caja')
+        .select('id')
+        .eq('estado', 'abierto')
+        .gte('apertura_at', hoy.toISOString())
+        .limit(1)
+        .maybeSingle()
+      if (yaAbierto) {
+        toast('La caja ya fue abierta por otro cajero.', { icon: 'ℹ️' })
+        onAperturado()
+        return
+      }
+
       const { error } = await supabase.from('cortes_caja').insert({
         cajero_id: cajero.id,
         cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,

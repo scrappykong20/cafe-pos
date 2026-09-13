@@ -1,10 +1,10 @@
-const { app, BrowserWindow, shell, Menu, dialog } = require('electron')
+const { app, BrowserWindow, shell, Menu, dialog, ipcMain } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const fs = require('fs')
 
-// Teclado virtual para pantallas táctiles Windows
-app.commandLine.appendSwitch('enable-features', 'VirtualKeyboard')
+// ── Modo kiosko (pasado como argumento --kiosk desde el registro o la línea de comandos) ──
+const IS_KIOSK = process.argv.includes('--kiosk')
 
 // ── Auto-updater ─────────────────────────────────────────────────────────────
 let autoUpdater = null
@@ -72,17 +72,33 @@ function createWindow () {
     show: false,               // oculta hasta que cargue — sin parpadeo blanco
     backgroundColor: '#0D0D0D',
     icon: path.join(BASE, 'public', 'logo.png'),
-    frame: false,
+    frame: false,              // siempre sin barra de título — look POS profesional
+    kiosk: IS_KIOSK,           // fullscreen bloqueado — sin barra de tareas ni alt+f4
+    fullscreen: IS_KIOSK,
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: false,  // false para que preload corra en el mismo mundo que la página
-                                // (necesario para que el override de navigator.serviceWorker funcione)
-      webSecurity: false,       // necesario para cargar recursos de Supabase desde file://
+      contextIsolation: false, // TODO: migrar a contextBridge para habilitar aislamiento
+                               // Actualmente el preload accede directamente a window y navigator,
+                               // lo que requiere contextIsolation: false
+      webSecurity: true,       // habilitado — los recursos de Supabase se cargan por HTTPS
       preload: path.join(__dirname, 'preload.js'),
-      enableBlinkFeatures: 'VirtualKeyboard',
     },
   })
+
+  // En modo kiosko: bloquear atajos de teclado que puedan salir de la app
+  if (IS_KIOSK) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      // Bloquear Alt+F4, F11, Ctrl+W, Ctrl+Q
+      if (
+        (input.alt && input.key === 'F4') ||
+        input.key === 'F11' ||
+        (input.control && (input.key === 'w' || input.key === 'q'))
+      ) {
+        event.preventDefault()
+      }
+    })
+  }
 
   // Bloquear service worker y workbox ANTES de cargar la página.
   // Usamos <all_urls> con filtro en callback porque los patrones file://**
@@ -106,13 +122,32 @@ function createWindow () {
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    // Solo permitir https:// y http:// — bloquear file://, shell://, ms-msdt:// etc.
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        shell.openExternal(url)
+      }
+    } catch (_) {
+      // URL inválida — ignorar
+    }
     return { action: 'deny' }
   })
 
   const indexPath = path.join(BASE, 'dist', 'index.html')
   mainWindow.loadFile(indexPath)
 }
+
+// ── IPC: salir del sistema con clave ────────────────────────────────────────
+const CLAVE_SALIDA = process.env.CLAVE_SALIDA_KIOSKO || '3943'
+ipcMain.handle('cerrar-app', (_event, clave) => {
+  if (String(clave) === CLAVE_SALIDA) {
+    killPrintServer()
+    app.quit()
+    return true
+  }
+  return false
+})
 
 // ── Ciclo de vida ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {

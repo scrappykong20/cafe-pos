@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 
 interface Props { cajero: CajeroActivo; onVolver: () => void }
@@ -40,6 +41,7 @@ export default function DashboardPage({ cajero: _cajero, onVolver }: Props) {
   const [ultimaActualizacion, setUltimaActualizacion] = useState(new Date())
 
   const cargar = useCallback(async () => {
+    try {
     const hoy = new Date()
     hoy.setHours(0, 0, 0, 0)
     const hoyStr = hoy.toISOString()
@@ -49,10 +51,16 @@ export default function DashboardPage({ cajero: _cajero, onVolver }: Props) {
     const semanaStr = inicioSemana.toISOString()
 
     const [ventasRes, ordenesRes, mesasRes] = await Promise.all([
-      supabase.from('ventas').select('total, cajero_nombre, created_at').gte('created_at', hoyStr),
+      supabase.from('ventas').select('id, total, cajero_nombre, created_at').gte('created_at', hoyStr).eq('estado', 'completada'),
       supabase.from('ordenes').select('id, mesa_nombre, created_at, estado, orden_items(id, precio, cantidad)').eq('estado', 'abierta'),
       supabase.from('mesas').select('id, estado'),
     ])
+
+    if (ventasRes.error || ordenesRes.error || mesasRes.error) {
+      toast.error('Error al cargar datos del dashboard')
+      setLoading(false)
+      return
+    }
 
     const ventas = ventasRes.data ?? []
     const ordenes = ordenesRes.data ?? []
@@ -65,23 +73,31 @@ export default function DashboardPage({ cajero: _cajero, onVolver }: Props) {
 
     // Top cajero
     const porCajero: Record<string, number> = {}
-    ventas.forEach(v => { porCajero[v.cajero_nombre] = (porCajero[v.cajero_nombre] ?? 0) + Number(v.total) })
+    ventas.forEach(v => {
+      if (!v.cajero_nombre) return
+      porCajero[v.cajero_nombre] = (porCajero[v.cajero_nombre] ?? 0) + Number(v.total)
+    })
     const cajeroTop = Object.entries(porCajero).sort((a, b) => b[1] - a[1])[0]
 
-    // Top producto
-    const { data: detalleData } = await supabase
-      .from('venta_items')
-      .select('nombre, subtotal')
-      .gte('created_at', hoyStr)
+    // Top producto — filtrar por IDs de ventas de hoy (venta_items no tiene created_at)
+    const ventaIds = ventas.map((v: { id: string }) => v.id)
     const porProducto: Record<string, number> = {}
-    ;(detalleData ?? []).forEach((d: { nombre: string; subtotal: number }) => {
-      porProducto[d.nombre] = (porProducto[d.nombre] ?? 0) + Number(d.subtotal)
-    })
+    if (ventaIds.length > 0) {
+      const { data: detalleData, error: detalleErr } = await supabase
+        .from('venta_items')
+        .select('nombre, subtotal')
+        .in('venta_id', ventaIds)
+      if (!detalleErr) {
+        ;(detalleData ?? []).forEach((d: { nombre: string; subtotal: number }) => {
+          porProducto[d.nombre] = (porProducto[d.nombre] ?? 0) + Number(d.subtotal)
+        })
+      }
+    }
     const productoTop = Object.entries(porProducto).sort((a, b) => b[1] - a[1])[0]
 
     // Ventas semana
-    const { data: ventasSemanaData } = await supabase.from('ventas').select('total').gte('created_at', semanaStr)
-    const ventasSemana = (ventasSemanaData ?? []).reduce((s, v) => s + Number(v.total), 0)
+    const { data: ventasSemanaData, error: semanaErr } = await supabase.from('ventas').select('total').gte('created_at', semanaStr).eq('estado', 'completada')
+    const ventasSemana = semanaErr ? 0 : (ventasSemanaData ?? []).reduce((s, v) => s + Number(v.total ?? 0), 0)
 
     // Mesas
     const mesasOcupadas = mesas.filter(m => m.estado === 'ocupada').length
@@ -111,7 +127,11 @@ export default function DashboardPage({ cajero: _cajero, onVolver }: Props) {
     )
 
     setUltimaActualizacion(new Date())
-    setLoading(false)
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {

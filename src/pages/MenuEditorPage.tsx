@@ -67,27 +67,35 @@ export default function MenuEditorPage({ cajero: _cajero, onVolver }: Props) {
 
   async function cargar() {
     setLoading(true)
-    const { data } = await supabase.from('menu').select('*').order('categoria').order('orden')
-    const menu = (data as MenuItem[]) ?? []
-    setItems(menu)
-    const cats = [...new Set(menu.map(m => m.categoria))].filter(Boolean)
-    if (cats.length > 0) setCategorias([...new Set([...CATEGORIAS_DEFECTO, ...cats])])
-    setLoading(false)
+    try {
+      const { data, error } = await supabase.from('menu').select('*').order('categoria').order('orden')
+      if (error) { toast.error('Error al cargar menú'); return }
+      const menu = (data as MenuItem[]) ?? []
+      setItems(menu)
+      const cats = [...new Set(menu.map(m => m.categoria))].filter(Boolean)
+      if (cats.length > 0) setCategorias([...new Set([...CATEGORIAS_DEFECTO, ...cats])])
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function cargarGrupos() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('modificadores_grupo')
       .select('id, nombre, requerido, max_seleccion')
       .order('orden')
+    if (error) { toast.error('Error al cargar grupos'); return }
     setGrupos((data as GrupoModificador[]) ?? [])
   }
 
   async function cargarGruposDeProducto(menuId: string) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('menu_modificadores')
       .select('grupo_id')
       .eq('menu_id', menuId)
+    if (error) { return }
     const ids = new Set((data ?? []).map((r: any) => r.grupo_id as string))
     setGruposSeleccionados(ids)
   }
@@ -131,6 +139,7 @@ export default function MenuEditorPage({ cajero: _cajero, onVolver }: Props) {
   }
 
   async function guardar(e: React.FormEvent) {
+    if (guardando) return
     e.preventDefault()
     const precio = parseFloat(fPrecio)
     if (!fNombre.trim() || isNaN(precio) || precio <= 0) return
@@ -164,10 +173,12 @@ export default function MenuEditorPage({ cajero: _cajero, onVolver }: Props) {
     }
 
     // Guardar grupos de modificadores asignados
-    await supabase.from('menu_modificadores').delete().eq('menu_id', menuId)
+    const { error: delModErr } = await supabase.from('menu_modificadores').delete().eq('menu_id', menuId)
+    if (delModErr) { toast.error('Error al actualizar modificadores'); setGuardando(false); return }
     if (gruposSeleccionados.size > 0) {
       const rows = Array.from(gruposSeleccionados).map(grupo_id => ({ menu_id: menuId, grupo_id }))
-      await supabase.from('menu_modificadores').insert(rows)
+      const { error: insModErr } = await supabase.from('menu_modificadores').insert(rows)
+      if (insModErr) { toast.error('Error al guardar modificadores'); setGuardando(false); return }
     }
 
     toast.success(editItem ? 'Producto actualizado' : 'Producto creado')
@@ -177,21 +188,29 @@ export default function MenuEditorPage({ cajero: _cajero, onVolver }: Props) {
   }
 
   async function toggleDisponible(item: MenuItem) {
-    await supabase.from('menu').update({ disponible: !item.disponible }).eq('id', item.id)
+    const { error } = await supabase.from('menu').update({ disponible: !item.disponible }).eq('id', item.id)
+    if (error) { toast.error('Error al cambiar disponibilidad'); return }
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, disponible: !i.disponible } : i))
   }
 
   async function toggleDestaque(item: MenuItem) {
-    await supabase.from('menu').update({ destaque: !item.destaque }).eq('id', item.id)
+    const { error } = await supabase.from('menu').update({ destaque: !item.destaque }).eq('id', item.id)
+    if (error) { toast.error('Error al cambiar destaque'); return }
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, destaque: !i.destaque } : i))
   }
 
+  const [eliminando, setEliminando] = useState(false)
   async function confirmarEliminar() {
-    if (!eliminarId) return
-    const { error } = await supabase.from('menu').delete().eq('id', eliminarId)
-    if (error) { toast.error('Error al eliminar producto'); }
-    setEliminarId(null)
-    cargar()
+    if (!eliminarId || eliminando) return
+    setEliminando(true)
+    try {
+      const { error } = await supabase.from('menu').delete().eq('id', eliminarId)
+      setEliminarId(null)
+      if (error) { toast.error('Error al eliminar producto'); return }
+      cargar()
+    } finally {
+      setEliminando(false)
+    }
   }
 
   const itemsFiltrados = items.filter(i => {
@@ -414,7 +433,7 @@ export default function MenuEditorPage({ cajero: _cajero, onVolver }: Props) {
               </p>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
                 <button onClick={() => setEliminarId(null)} style={{ flex: 1, padding: '0.6rem', background: 'var(--dark)', border: '1px solid var(--border)', color: 'var(--muted)', fontWeight: 900, fontSize: '0.75rem', textTransform: 'uppercase', cursor: 'pointer', borderRadius: 2 }}>Cancelar</button>
-                <button onClick={confirmarEliminar} style={{ flex: 1, padding: '0.6rem', background: '#ef4444', border: 'none', color: '#fff', fontWeight: 900, fontSize: '0.75rem', textTransform: 'uppercase', cursor: 'pointer', borderRadius: 2 }}>Eliminar</button>
+                <button onClick={confirmarEliminar} disabled={eliminando} style={{ flex: 1, padding: '0.6rem', background: '#ef4444', border: 'none', color: '#fff', fontWeight: 900, fontSize: '0.75rem', textTransform: 'uppercase', cursor: eliminando ? 'not-allowed' : 'pointer', borderRadius: 2, opacity: eliminando ? 0.6 : 1 }}>{eliminando ? 'Eliminando...' : 'Eliminar'}</button>
               </div>
             </div>
           </div>

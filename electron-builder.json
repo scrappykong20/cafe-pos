@@ -1,9 +1,9 @@
 {
   "appId": "mx.cafedelconstructor.pos",
   "productName": "Cafe POS",
-  "copyright": "El Cafe del Constructor",
+  "copyright": "El Cafe del Constructor © 2025",
   "directories": {
-    "output": "C:\\CafePosBuild\\output"
+    "output": "C:\\Users\\Scrappykong20\\Desktop\\PROYECTO CAFETERIA APPS\\instalador"
   },
   "files": [
     "electron/main.js",
@@ -43,16 +43,25 @@
   "publish": {
     "provider": "github",
     "owner": "scrappykong20",
-    "repo": "cafe-pos"
+    "repo": "cafe-pos",
+    "releaseType": "release"
   },
   "nsis": {
-    "oneClick": true,
+    "oneClick": false,
     "perMachine": true,
     "allowElevation": true,
+    "allowToChangeInstallationDirectory": false,
+    "installerIcon": "public/icon.ico",
+    "uninstallerIcon": "public/icon.ico",
+    "installerHeaderIcon": "public/icon.ico",
     "deleteAppDataOnUninstall": false,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
+    "menuCategory": "Cafe del Constructor",
     "shortcutName": "Cafe POS",
-    "runAfterFinish": true
+    "runAfterFinish": true,
+    "include": "electron/installer.nsh",
+    "license": null,
+    "installerLanguages": ["en_US"]
   }
 }

@@ -36,12 +36,19 @@ export default defineConfig({
         ]
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
         runtimeCaching: [
+          // Menú: StaleWhileRevalidate — carga inmediato desde caché, actualiza en background
+          {
+            urlPattern: /^https:\/\/lycrdngkgnkvduahkljk\.supabase\.co\/rest\/v1\/menu.*/i,
+            handler: 'StaleWhileRevalidate',
+            options: { cacheName: 'menu-cache', expiration: { maxAgeSeconds: 86400 } }
+          },
+          // Resto de Supabase: NetworkFirst con timeout corto, fallback a caché
           {
             urlPattern: /^https:\/\/lycrdngkgnkvduahkljk\.supabase\.co\/.*/i,
             handler: 'NetworkFirst',
-            options: { cacheName: 'supabase-cache', networkTimeoutSeconds: 10 }
+            options: { cacheName: 'supabase-cache', networkTimeoutSeconds: 3 }
           }
         ]
       }

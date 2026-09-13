@@ -41,7 +41,7 @@ const PC850: Record<string, number> = {
   'Á':0xB5,'É':0x90,'Í':0xD6,'Ó':0xE0,'Ú':0xE9,'Ñ':0xA5,'Ü':0x9A,
   '¡':0xAD,'¿':0xA8,'°':0xF8,
   // Caracteres de caja (PC850)
-  '║':0xBA,'╔':0xC9,'╗':0xBB,'╚':0xC8,'╝':0xBC,'═':0xCD,
+  '║':0xBA,'╔':0xC9,'╗':0xBB,'╚':0xC8,'╝':0xBC,'═':0xCD,'╠':0xCC,'╣':0xB9,
   '│':0xB3,'─':0xC4,'┌':0xDA,'┐':0xBF,'└':0xC0,'┘':0xD9,
 }
 
@@ -285,12 +285,13 @@ export function buildReciboHTML(opts: {
   metodoPagoLabel: string
   cambioFinal: number
   metodoPago: string
+  efectivoMixto?: number
+  tarjetaMixto?: number
   engranajeFinal: number
   saldoFinal: number
   clienteNombre?: string
   cajeroNombre?: string
   turno?: string
-  // Datos del local (vienen de ajustes en Supabase)
   nombreLocal?: string
   direccionLocal?: string
   telefonoLocal?: string
@@ -299,96 +300,140 @@ export function buildReciboHTML(opts: {
     fecha, ordenStr, mesaNombre, items, canjeItems,
     subtotalBase, descuentoTotal, propinaMonto, totalACobrar,
     metodoPagoLabel, cambioFinal, metodoPago,
-    engranajeFinal, saldoFinal, clienteNombre, cajeroNombre, turno,
+    efectivoMixto, tarjetaMixto,
+    engranajeFinal, saldoFinal, clienteNombre, cajeroNombre,
     nombreLocal, direccionLocal, telefonoLocal,
   } = opts
 
   const NOMBRE_CAFE = (nombreLocal || NOMBRE_CAFE_DEFAULT).toUpperCase()
-  const DIRECCION   = direccionLocal || DIRECCION_DEFAULT
-  const ESLOGAN     = ESLOGAN_DEFAULT
-
   const buf = new EscBuf()
 
-  buf.raw(0x1B, 0x40)       // ESC @ — inicializar
-  buf.raw(0x1B, 0x74, 0x02) // ESC t 2 — code page PC850
-  buf.feed(2)                // margen superior
+  buf.raw(0x1B, 0x40)
+  buf.raw(0x1B, 0x74, 0x02)
+  buf.feed(1)
 
-  // ── Encabezado ────────────────────────────────────────────────────────
+  // ══════════════ ENCABEZADO ══════════════
   buildEncabezadoBox(buf, {
     nombre:    NOMBRE_CAFE,
-    direccion: DIRECCION || undefined,
+    direccion: direccionLocal || undefined,
     telefono:  telefonoLocal,
-    eslogan:   ESLOGAN,
+    eslogan:   ESLOGAN_DEFAULT,
   })
+
+  // ── Titulo del ticket ─────────────────────────────────────────────────
+  buf.alignCenter()
+  buf.boldOn()
+  buf.line('*  NOTA DE VENTA  *')
+  buf.boldOff()
+  buf.line('='.repeat(W))
 
   // ── Datos de la orden ─────────────────────────────────────────────────
   buf.alignLeft()
-  buf.line(`Fecha:  ${fecha}`)
-  buf.line(`Mesa:   ${mesaNombre}`)
-  if (cajeroNombre) buf.line(`Cajero: ${cajeroNombre.split(' ')[0]}`)
-  buf.sep()
+  const cajero1 = cajeroNombre ? cajeroNombre.split(' ')[0] : ''
+  if (ordenStr) {
+    buf.lr(`Orden ${ordenStr}`, fecha)
+  } else {
+    buf.line(`Fecha:  ${fecha}`)
+  }
+  buf.lr(`Mesa: ${mesaNombre}`, cajero1 ? `Cajero: ${cajero1}` : '')
+  buf.line('-'.repeat(W))
+
+  // ── Encabezado columnas artículos ─────────────────────────────────────
+  buf.boldOn()
+  buf.line('ARTICULO                    CANT    TOTAL')
+  buf.boldOff()
+  buf.line('-'.repeat(W))
 
   // ── Artículos ─────────────────────────────────────────────────────────
   for (const item of items) {
-    buf.lr(`${item.nombre} x${item.cantidad}`, `$${(item.precio * item.cantidad).toFixed(2)}`)
-    if (item.notas) buf.line(`  > ${item.notas}`)
+    const totalItem = `$${(item.precio * item.cantidad).toFixed(2)}`
+    const cant      = `x${item.cantidad}`
+    const maxNom    = W - cant.length - totalItem.length - 4
+    const nom       = item.nombre.length > maxNom
+      ? item.nombre.slice(0, maxNom - 1) + '.'
+      : item.nombre
+    const gap       = W - nom.length - cant.length - totalItem.length
+    buf.line(`${nom}${' '.repeat(Math.max(1, gap - 1))}${cant} ${totalItem}`)
+    // precio unitario en línea secundaria si es diferente de totalItem
+    if (item.cantidad > 1) {
+      buf.line(`  c/u $${item.precio.toFixed(2)}`)
+    }
+    if (item.notas) buf.line(`  >> ${item.notas}`)
   }
 
-  // Canjes
+  // ── Canjes ────────────────────────────────────────────────────────────
   if (canjeItems && canjeItems.length > 0) {
-    buf.sep()
+    buf.line('-'.repeat(W))
+    buf.boldOn(); buf.line('CANJES:'); buf.boldOff()
     for (const c of canjeItems) {
-      buf.lr(`* Canje: ${c.nombre} x${c.cantidad}`, `-${c.costo} eng`)
+      buf.lr(`  ${c.emoji || '*'} ${c.nombre} x${c.cantidad}`, `-${c.costo} eng`)
     }
   }
 
-  buf.sep()
+  buf.line('-'.repeat(W))
 
-  // ── Subtotal / descuentos / propina ───────────────────────────────────
+  // ── Subtotales ────────────────────────────────────────────────────────
   buf.lr('Subtotal', `$${subtotalBase.toFixed(2)}`)
-  if (descuentoTotal > 0) buf.lr('Descuentos', `-$${descuentoTotal.toFixed(2)}`)
-  if (propinaMonto > 0)   buf.lr('Propina',    `+$${propinaMonto.toFixed(2)}`)
+  if (descuentoTotal > 0) {
+    buf.boldOn()
+    buf.lr('Descuento aplicado', `-$${descuentoTotal.toFixed(2)}`)
+    buf.boldOff()
+  }
+  if (propinaMonto > 0) buf.lr('Propina', `+$${propinaMonto.toFixed(2)}`)
+
   buf.line('='.repeat(W))
 
-  // ── TOTAL en grande ───────────────────────────────────────────────────
+  // ── TOTAL grande ──────────────────────────────────────────────────────
   buf.alignCenter()
   buf.boldOn().size(2, 2)
   buf.line(`$${totalACobrar.toFixed(2)}`)
   buf.size(1, 1)
-  buf.line('TOTAL')
+  buf.line('TOTAL  A  PAGAR')
   buf.boldOff()
   buf.line('='.repeat(W))
 
-  // ── Pago ─────────────────────────────────────────────────────────────
+  // ── Forma de pago ─────────────────────────────────────────────────────
   buf.alignLeft()
-  buf.lr('Metodo de pago', metodoPagoLabel)
+  buf.boldOn()
+  buf.lr('Forma de pago:', metodoPagoLabel)
+  buf.boldOff()
+  if (metodoPago === 'mixto' && efectivoMixto !== undefined && tarjetaMixto !== undefined) {
+    buf.lr('  Efectivo', `$${efectivoMixto.toFixed(2)}`)
+    buf.lr('  Tarjeta',  `$${tarjetaMixto.toFixed(2)}`)
+  }
   if ((metodoPago === 'efectivo' || metodoPago === 'mixto') && cambioFinal > 0) {
-    buf.lr('Cambio entregado', `$${cambioFinal.toFixed(2)}`)
+    buf.boldOn()
+    buf.lr('Cambio:', `$${cambioFinal.toFixed(2)}`)
+    buf.boldOff()
   }
 
-  // ── Engranajes / loyalty (solo si el cliente escaneó QR) ─────────────
+  // ── Engranajes / loyalty ──────────────────────────────────────────────
   if (clienteNombre) {
-    buf.sep()
+    buf.line('='.repeat(W))
     buf.alignCenter()
+    buf.line('** PROGRAMA DE LEALTAD **')
+    buf.line(clienteNombre.toUpperCase())
     if (engranajeFinal > 0) {
       buf.boldOn()
-      buf.line(`+${engranajeFinal} ENGRANAJES GANADOS`)
+      buf.line(`+ ${engranajeFinal} ENGRANAJES GANADOS`)
       buf.boldOff()
     }
-    buf.line(clienteNombre)
-    buf.line(`Saldo: ${saldoFinal.toLocaleString()} engranajes`)
+    buf.line(`Saldo total: ${saldoFinal.toLocaleString()} eng`)
     buf.alignLeft()
   }
 
-  // ── Pie de página ─────────────────────────────────────────────────────
-  buf.sep()
+  // ── Pie de pagina ─────────────────────────────────────────────────────
+  buf.line('='.repeat(W))
   buf.alignCenter()
   buf.boldOn().size(1, 2)
-  buf.line('Gracias por tu visita!')
+  buf.line('iGracias por tu visita!')
   buf.size(1, 1).boldOff()
-  buf.line('Construye tu proxima visita con nosotros.')
+  buf.line('Construye tu proxima visita con nosotros')
+  buf.line(' ')
+  buf.line('- NO ES COMPROBANTE FISCAL -')
+  buf.line('='.repeat(W))
 
-  buf.feed(4) // margen inferior
+  buf.feed(4)
   buf.cut()
 
   return buf.toBase64()
@@ -427,41 +472,52 @@ export function buildPreTicketHTML(opts: {
     eslogan:   ESLOGAN_DEFAULT,
   })
 
-  buf.line(`Fecha:  ${fechaStr}  ${horaStr}`)
-  buf.line(`Mesa:   ${mesaNombre}`)
-  buf.line(`Cajero: ${cajeroNombre}`)
-  if (notaOrden) buf.line(`Nota:   ${notaOrden}`)
-  buf.sep()
-
-  // Encabezado columnas
-  buf.boldOn().line(`CT DESCRIPCION                P.UNIT   TOTAL`).boldOff()
-  buf.sep()
-
-  for (const item of items) {
-    const cant   = String(item.cantidad).padStart(2)
-    const pUnit  = `$${item.precio.toFixed(2)}`.padStart(7)
-    const total  = `$${(item.precio * item.cantidad).toFixed(2)}`.padStart(7)
-    const maxNom = W - cant.length - pUnit.length - total.length - 3
-    const nom    = item.nombre.length > maxNom ? item.nombre.slice(0, maxNom - 1) + '.' : item.nombre.padEnd(maxNom)
-    buf.line(`${cant} ${nom} ${pUnit} ${total}`)
-    if (item.notas) buf.line(`   > ${item.notas}`)
-  }
-
-  buf.sep()
-  buf.lr('Subtotal:', `$${sub.toFixed(2)}`)
-  if (descuento > 0) buf.lr('Descuento:', `-$${descuento.toFixed(2)}`)
+  // ── Titulo ────────────────────────────────────────────────────────────
+  buf.alignCenter()
+  buf.boldOn()
+  buf.line('*  CUENTA  *')
+  buf.boldOff()
   buf.line('='.repeat(W))
 
-  // Total en grande centrado
+  // ── Datos ─────────────────────────────────────────────────────────────
+  buf.alignLeft()
+  buf.lr(`Mesa: ${mesaNombre}`, `${fechaStr} ${horaStr}`)
+  buf.lr(`Cajero: ${cajeroNombre.split(' ')[0]}`, '')
+  if (notaOrden) buf.line(`Nota: ${notaOrden}`)
+  buf.line('-'.repeat(W))
+
+  // ── Columnas artículos ────────────────────────────────────────────────
+  buf.boldOn().line('ARTICULO                    CANT    TOTAL').boldOff()
+  buf.line('-'.repeat(W))
+
+  for (const item of items) {
+    const totalItem = `$${(item.precio * item.cantidad).toFixed(2)}`
+    const cant      = `x${item.cantidad}`
+    const maxNom    = W - cant.length - totalItem.length - 4
+    const nom       = item.nombre.length > maxNom
+      ? item.nombre.slice(0, maxNom - 1) + '.'
+      : item.nombre
+    const gap       = W - nom.length - cant.length - totalItem.length
+    buf.line(`${nom}${' '.repeat(Math.max(1, gap - 1))}${cant} ${totalItem}`)
+    if (item.cantidad > 1) buf.line(`  c/u $${item.precio.toFixed(2)}`)
+    if (item.notas) buf.line(`  >> ${item.notas}`)
+  }
+
+  buf.line('-'.repeat(W))
+  buf.lr('Subtotal:', `$${sub.toFixed(2)}`)
+  if (descuento > 0) {
+    buf.boldOn(); buf.lr('Descuento:', `-$${descuento.toFixed(2)}`); buf.boldOff()
+  }
+  buf.line('='.repeat(W))
+
   buf.alignCenter()
   buf.boldOn().size(2, 2)
   buf.line(`$${tot.toFixed(2)}`)
   buf.size(1, 1)
-  buf.line('TOTAL A PAGAR')
+  buf.line('TOTAL  A  PAGAR')
   buf.boldOff()
   buf.line('='.repeat(W))
-  buf.line()
-  buf.line('NO ES COMPROBANTE FISCAL')
+  buf.line('- PRE-CUENTA  /  NO FISCAL -')
   buf.alignLeft()
   buf.feed(4)
   buf.cut()
@@ -565,54 +621,89 @@ export function buildComandaHTML(opts: {
   const { ordenStr, mesaNombre, cajeroNombre, tipo, hora, items, notaOrden, esConsumoEmpleado } = opts
 
   const buf = new EscBuf()
-
   buf.raw(0x1B, 0x40)
   buf.raw(0x1B, 0x74, 0x02)
-  buf.feed(2) // margen superior
+  buf.feed(1)
 
+  const IW = W - 2
+  const bTop = '╔' + '═'.repeat(IW) + '╗'
+  const bBot = '╚' + '═'.repeat(IW) + '╝'
+  const bSep = '╠' + '═'.repeat(IW) + '╣'
+  const bRow = (text: string) => {
+    const pad = Math.max(0, IW - text.length)
+    return '║' + ' '.repeat(Math.floor(pad / 2)) + text + ' '.repeat(Math.ceil(pad / 2)) + '║'
+  }
+
+  // ── Encabezado ─────────────────────────────────────────────────────────
+  buf.alignLeft()
+  buf.line(bTop)
+  buf.boldOn()
+  buf.line(bRow('** COMANDA DE COCINA **'))
+  buf.boldOff()
+
+  if (esConsumoEmpleado || tipo === 'llevar') {
+    buf.line(bSep)
+    if (esConsumoEmpleado) { buf.boldOn(); buf.line(bRow('[ CONSUMO EMPLEADO ]')); buf.boldOff() }
+    if (tipo === 'llevar')  { buf.boldOn(); buf.line(bRow('>>>  PARA LLEVAR  <<<')); buf.boldOff() }
+  }
+  buf.line(bBot)
+
+  // ── Mesa grande centrada ────────────────────────────────────────────────
   buf.alignCenter()
-
-  if (esConsumoEmpleado) {
-    buf.boldOn()
-    buf.ctr('*** CONSUMO EMPLEADO ***')
-    buf.boldOff()
-    buf.line()
-  }
-
-  if (tipo === 'llevar') {
-    buf.boldOn()
-    buf.ctr('*** PARA LLEVAR ***')
-    buf.boldOff()
-    buf.line()
-  }
-
-  // Mesa: muy grande
   buf.boldOn().size(2, 2)
-  buf.ctr(mesaNombre)
+  buf.line(mesaNombre)
   buf.size(1, 1).boldOff()
 
-  buf.line()
-  buf.ctr(`${hora}  |  ${cajeroNombre}`)
-  if (ordenStr) buf.ctr(`Orden: ${ordenStr}`)
-  buf.sep()
-
-  // Items en tamaño grande
+  // ── Hora + cajero + orden ───────────────────────────────────────────────
+  buf.line('='.repeat(W))
   buf.alignLeft()
+  buf.lr(`  ${hora}`, cajeroNombre.split(' ')[0])
+  if (ordenStr) buf.lr('  Orden:', `#${ordenStr}`)
+  buf.line('='.repeat(W))
+  buf.line('')
+
+  // ── Items — cada uno con checkbox y doble alto ──────────────────────────
   for (const item of items) {
+    // Cantidad con caja visual: [ x3 ]
+    const cantBox = `[x${item.cantidad}]`
+    const prefix  = `${cantBox} `
+    const maxNom  = W - prefix.length
+    const nombre  = item.nombre.length > maxNom
+      ? item.nombre.slice(0, maxNom - 1) + '.'
+      : item.nombre
+
     buf.boldOn().size(1, 2)
-    buf.line(`${item.emoji} ${item.nombre}  x${item.cantidad}`)
+    buf.line(`${prefix}${nombre}`)
     buf.size(1, 1).boldOff()
-    if (item.notas) buf.line(`   > ${item.notas}`)
+
+    if (item.notas) {
+      buf.boldOn()
+      buf.line(`  >> ${item.notas}`)
+      buf.boldOff()
+    }
+    buf.line('')
   }
 
+  buf.line('-'.repeat(W))
+
+  // ── Nota especial ───────────────────────────────────────────────────────
   if (notaOrden) {
-    buf.sep()
-    buf.boldOn().line(`NOTA: ${notaOrden}`).boldOff()
+    buf.boldOn().line('  NOTA:').boldOff()
+    const words = notaOrden.split(' ')
+    let cur = ''
+    for (const word of words) {
+      const test = cur ? `${cur} ${word}` : word
+      if (test.length > W - 4) { if (cur) buf.line(`  ${cur}`); cur = word }
+      else cur = test
+    }
+    if (cur) buf.line(`  ${cur}`)
+    buf.line('-'.repeat(W))
   }
 
-  buf.sep()
-  buf.feed(4) // margen inferior
+  buf.alignCenter()
+  buf.line(`*** ${hora} ***`)
+  buf.alignLeft()
+  buf.feed(4)
   buf.cut()
-
   return buf.toBase64()
 }

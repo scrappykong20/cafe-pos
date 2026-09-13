@@ -27,13 +27,20 @@ export default function FiadosPage({ cajero, onVolver }: Props) {
 
   async function cargar() {
     setLoading(true)
-    const { data } = await supabase.from('fiados').select('*').eq('activo', true).order('cliente_nombre')
-    setFiados((data as Fiado[]) ?? [])
-    setLoading(false)
+    try {
+      const { data, error } = await supabase.from('fiados').select('*').eq('activo', true).order('cliente_nombre')
+      if (error) { toast.error('Error al cargar fiados'); return }
+      setFiados((data as Fiado[]) ?? [])
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function cargarMovs(fiadoId: string) {
-    const { data } = await supabase.from('fiados_movimientos').select('*').eq('fiado_id', fiadoId).order('created_at', { ascending: false }).limit(20)
+    const { data, error } = await supabase.from('fiados_movimientos').select('*').eq('fiado_id', fiadoId).order('created_at', { ascending: false }).limit(20)
+    if (error) { toast.error('Error al cargar movimientos'); return }
     setMovs((data as Movimiento[]) ?? [])
   }
 
@@ -41,35 +48,78 @@ export default function FiadosPage({ cajero, onVolver }: Props) {
     e.preventDefault()
     if (!nombre.trim()) return
     setGuardando(true)
-    await supabase.from('fiados').insert({ cliente_nombre: nombre.trim(), cliente_telefono: tel.trim() || null, limite_credito: parseFloat(limite) || 500, saldo: 0, notas: notaF.trim() || null })
-    setNombre(''); setTel(''); setLimite('500'); setNotaF('')
-    setShowNuevo(false); setGuardando(false); cargar()
+    try {
+      const { error } = await supabase.from('fiados').insert({ cliente_nombre: nombre.trim(), cliente_telefono: tel.trim() || null, limite_credito: parseFloat(limite) || 500, saldo: 0, notas: notaF.trim() || null })
+      if (error) { toast.error('Error al crear fiado: ' + error.message); return }
+      setNombre(''); setTel(''); setLimite('500'); setNotaF('')
+      setShowNuevo(false); cargar()
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
+      setGuardando(false)
+    }
   }
 
   async function agregarMov(e: React.FormEvent) {
     e.preventDefault()
-    if (!selected) return
+    if (!selected || guardando) return
     const m = parseFloat(movMonto)
     if (isNaN(m) || m <= 0) return
 
     // Validar abono mayor al saldo actual
-    if (movTipo === 'abono' && m > selected.saldo) {
+    if (movTipo === 'abono' && m > (selected.saldo ?? 0)) {
       const ok = window.confirm(
-        `El abono ($${m.toFixed(2)}) es mayor al saldo ($${selected.saldo.toFixed(2)}). El saldo quedará en $0. ¿Continuar?`
+        `El abono ($${m.toFixed(2)}) es mayor al saldo ($${(selected.saldo ?? 0).toFixed(2)}). El saldo quedará en $0. ¿Continuar?`
       )
       if (!ok) return
-      toast.error(`El abono ($${m.toFixed(2)}) es mayor al saldo ($${selected.saldo.toFixed(2)}). El saldo quedará en $0.`)
-      return
     }
 
     setGuardando(true)
-    const nuevoSaldo = movTipo === 'cargo' ? selected.saldo + m : Math.max(0, selected.saldo - m)
-    await supabase.from('fiados_movimientos').insert({ fiado_id: selected.id, tipo: movTipo, monto: m, concepto: movConcepto.trim() || null, cajero_nombre: `${cajero.nombre} ${cajero.last_name}` })
-    await supabase.from('fiados').update({ saldo: Math.max(0, nuevoSaldo) }).eq('id', selected.id)
+
+    // Intentar RPC atómico primero
+    const { data: rpcData, error: rpcErr } = await supabase.rpc('agregar_movimiento_fiado', {
+      p_fiado_id: selected.id,
+      p_monto: m,
+      p_tipo: movTipo,
+      p_descripcion: movConcepto.trim() || '',
+    })
+
+    if (!rpcErr && (rpcData as any)?.ok) {
+      toast.success('Movimiento registrado')
+      setMovMonto(''); setMovConcepto('')
+      setShowMov(false); setGuardando(false)
+      cargar()
+      cargarMovs(selected.id)
+      return
+    }
+
+    // Fallback: dos operaciones con rollback si falla el UPDATE de saldo
+    const { data: movData, error: errMov } = await supabase.from('fiados_movimientos').insert({
+      fiado_id: selected.id,
+      tipo: movTipo,
+      monto: m,
+      concepto: movConcepto.trim() || null,
+      cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
+    }).select('id').single()
+    if (errMov || !movData) { toast.error('Error al registrar movimiento'); setGuardando(false); return }
+
+    const nuevoSaldo = movTipo === 'cargo'
+      ? selected.saldo + m
+      : Math.max(0, selected.saldo - m)
+    const { error: errSaldo } = await supabase.from('fiados').update({ saldo: nuevoSaldo }).eq('id', selected.id)
+    if (errSaldo) {
+      // Rollback: eliminar el movimiento ya insertado para no dejar datos inconsistentes
+      await supabase.from('fiados_movimientos').delete().eq('id', movData.id)
+      toast.error('Error al actualizar saldo — movimiento revertido')
+      setGuardando(false)
+      return
+    }
+
+    toast.success('Movimiento registrado')
     setMovMonto(''); setMovConcepto('')
     setShowMov(false); setGuardando(false)
     cargar()
-    const fiadoActualizado = { ...selected, saldo: Math.max(0, nuevoSaldo) }
+    const fiadoActualizado = { ...selected, saldo: nuevoSaldo }
     setSelected(fiadoActualizado)
     cargarMovs(selected.id)
   }

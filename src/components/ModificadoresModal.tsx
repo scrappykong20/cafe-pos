@@ -48,10 +48,12 @@ export default function ModificadoresModal({ producto, accentColor, onConfirmar,
 
   async function cargarModificadores() {
     // 1. Obtener grupos vinculados a este producto
-    const { data: links } = await supabase
+    const { data: links, error: linksError } = await supabase
       .from('menu_modificadores')
       .select('grupo_id')
       .eq('menu_id', producto.id)
+
+    if (linksError) { console.error('Error cargando modificadores:', linksError); setLoading(false); return }
 
     if (!links || links.length === 0) {
       setGrupos([])
@@ -62,21 +64,24 @@ export default function ModificadoresModal({ producto, accentColor, onConfirmar,
     const grupoIds = links.map((l: any) => l.grupo_id)
 
     // 2. Obtener los grupos con sus opciones
-    const { data: gruposData } = await supabase
+    const { data: gruposData, error: gruposError } = await supabase
       .from('modificadores_grupo')
       .select('id, nombre, descripcion, requerido, multiple, min_seleccion, max_seleccion')
       .in('id', grupoIds)
       .eq('activo', true)
       .order('orden')
 
+    if (gruposError) { console.error('Error cargando grupos de modificadores:', gruposError); setLoading(false); return }
     if (!gruposData) { setLoading(false); return }
 
-    const { data: opcionesData } = await supabase
+    const { data: opcionesData, error: opcionesError } = await supabase
       .from('modificadores_opcion')
       .select('id, grupo_id, nombre, precio_extra, disponible, orden')
       .in('grupo_id', grupoIds)
       .eq('disponible', true)
       .order('orden')
+
+    if (opcionesError) { console.error('Error cargando opciones de modificadores:', opcionesError); setLoading(false); return }
 
     const gruposCompletos: Grupo[] = gruposData.map((g: any) => ({
       ...g,

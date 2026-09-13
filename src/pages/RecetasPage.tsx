@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import type { CSSProperties } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 
 interface Props {
@@ -65,55 +66,55 @@ export default function RecetasPage({ cajero: _cajero, onVolver }: Props) {
 
   const cargarDatos = useCallback(async () => {
     setLoading(true)
+    try {
+      // Cargar menu
+      const { data: menuData, error: menuError } = await supabase
+        .from('menu')
+        .select('id, nombre, emoji, categoria, precio, disponible')
+        .order('categoria')
+        .order('nombre')
 
-    // Cargar menu
-    const { data: menuData, error: menuError } = await supabase
-      .from('menu')
-      .select('id, nombre, emoji, categoria, precio, disponible')
-      .order('categoria')
-      .order('nombre')
+      if (menuError) return
 
-    if (menuError) {
-      setLoading(false)
-      return
-    }
+      setMenuItems(menuData ?? [])
 
-    setMenuItems(menuData ?? [])
+      // Cargar inventario (insumos)
+      const { data: invData, error: invError } = await supabase
+        .from('inventario')
+        .select('id, nombre, unidad, stock_actual')
+        .order('nombre')
 
-    // Cargar inventario (insumos)
-    const { data: invData, error: invError } = await supabase
-      .from('inventario')
-      .select('id, nombre, unidad, stock_actual')
-      .order('nombre')
-
-    if (!invError) {
-      setIngredientes(invData ?? [])
-    }
-
-    // Cargar recetas con JOIN a inventario
-    const { data: recetaData, error: recetaError } = await supabase
-      .from('recetas')
-      .select('id, menu_id, inventario_id, cantidad_por_unidad, inventario(id, nombre, unidad)')
-
-    if (recetaError) {
-      const code = (recetaError as { code?: string }).code
-      if (code === '42P01') {
-        setTablaError(true)
+      if (!invError) {
+        setIngredientes(invData ?? [])
       }
+
+      // Cargar recetas con JOIN a inventario
+      const { data: recetaData, error: recetaError } = await supabase
+        .from('recetas')
+        .select('id, menu_id, inventario_id, cantidad_por_unidad, inventario(id, nombre, unidad)')
+
+      if (recetaError) {
+        const code = (recetaError as { code?: string }).code
+        if (code === '42P01') {
+          setTablaError(true)
+        }
+        return
+      }
+
+      setTablaError(false)
+
+      // Agrupar recetas por menu_id
+      const agrupadas: Record<string, RecetaRow[]> = {}
+      ;((recetaData ?? []) as RecetaRow[]).forEach((r: RecetaRow) => {
+        if (!agrupadas[r.menu_id]) agrupadas[r.menu_id] = []
+        agrupadas[r.menu_id].push(r)
+      })
+      setRecetas(agrupadas)
+    } catch {
+      // error de red
+    } finally {
       setLoading(false)
-      return
     }
-
-    setTablaError(false)
-
-    // Agrupar recetas por menu_id
-    const agrupadas: Record<string, RecetaRow[]> = {}
-    ;(recetaData as unknown as RecetaRow[] ?? []).forEach((r: RecetaRow) => {
-      if (!agrupadas[r.menu_id]) agrupadas[r.menu_id] = []
-      agrupadas[r.menu_id].push(r)
-    })
-    setRecetas(agrupadas)
-    setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -135,6 +136,7 @@ export default function RecetasPage({ cajero: _cajero, onVolver }: Props) {
   }
 
   async function guardarIngrediente(menuItemId: string) {
+    if (guardando) return
     if (!form.inventario_id || !form.cantidad) return
     const cantidad = parseFloat(form.cantidad)
     if (isNaN(cantidad) || cantidad <= 0) return
@@ -146,7 +148,9 @@ export default function RecetasPage({ cajero: _cajero, onVolver }: Props) {
       cantidad_por_unidad: cantidad,
     })
 
-    if (!error) {
+    if (error) {
+      toast.error('Error al guardar ingrediente: ' + error.message)
+    } else {
       await recargarRecetasDeProducto(menuItemId)
       setFormAbierto(null)
       setForm({ inventario_id: '', cantidad: '' })
@@ -155,9 +159,13 @@ export default function RecetasPage({ cajero: _cajero, onVolver }: Props) {
   }
 
   async function eliminarIngrediente(recetaId: string, menuItemId: string) {
+    if (eliminando !== null) return
+    if (!window.confirm('¿Eliminar este ingrediente de la receta?')) return
     setEliminando(recetaId)
     const { error } = await supabase.from('recetas').delete().eq('id', recetaId)
-    if (!error) {
+    if (error) {
+      toast.error('Error al eliminar ingrediente: ' + error.message)
+    } else {
       await recargarRecetasDeProducto(menuItemId)
     }
     setEliminando(null)

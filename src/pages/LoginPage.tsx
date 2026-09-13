@@ -9,15 +9,21 @@ export default function LoginPage() {
   const [showPass, setShowPass] = useState(false)
 
   async function handleLogin(e: React.FormEvent) {
+    if (loading) return;
     e.preventDefault()
     setLoading(true)
-    const { error } = await supabase.auth.signInWithPassword({ email: correo, password })
-    if (error) {
-      toast.error(error.message === 'Invalid login credentials'
-        ? 'Correo o contraseña incorrectos'
-        : 'Error al iniciar sesión')
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email: correo, password })
+      if (error) {
+        toast.error(error.message === 'Invalid login credentials'
+          ? 'Correo o contraseña incorrectos'
+          : 'Error al iniciar sesión')
+      }
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   return (
@@ -81,6 +87,8 @@ export default function LoginPage() {
               </label>
               <input
                 type="email"
+                inputMode="email"
+                enterKeyHint="next"
                 value={correo}
                 onChange={e => setCorreo(e.target.value)}
                 placeholder="cajero@cafeteria.com"
@@ -97,6 +105,8 @@ export default function LoginPage() {
               <div className="relative">
                 <input
                   type={showPass ? 'text' : 'password'}
+                  inputMode="text"
+                  enterKeyHint="done"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   placeholder="••••••••"

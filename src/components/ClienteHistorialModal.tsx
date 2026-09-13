@@ -63,10 +63,12 @@ export default function ClienteHistorialModal({ clienteId, clienteNombre, onClos
       setVentas(ventasData as VentaHistorial[])
 
       // Stats: total visitas y total gastado (todas las ventas, no solo las últimas 10)
-      const { data: statsData } = await supabase
+      const { data: statsData, error: statsError } = await supabase
         .from('ventas')
         .select('total')
         .eq('usuario_id', clienteId)
+
+      if (statsError) { console.error('Error al cargar stats:', statsError.message); return }
 
       const totalVisitas = statsData?.length ?? 0
       const totalGastado = statsData?.reduce((s, v) => s + (v.total ?? 0), 0) ?? 0
@@ -116,11 +118,12 @@ export default function ClienteHistorialModal({ clienteId, clienteNombre, onClos
 
     setCargandoItems(prev => new Set(prev).add(ventaId))
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('venta_items')
         .select('id, nombre, emoji, cantidad, precio, subtotal')
         .eq('venta_id', ventaId)
 
+      if (error) return
       if (data) {
         setItemsPorVenta(prev => ({ ...prev, [ventaId]: data as VentaItemHistorial[] }))
       }

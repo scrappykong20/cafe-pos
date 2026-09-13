@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 import { crearTicket, imprimirPorTipo, hayImpresora } from '../services/printer'
 
@@ -96,82 +97,92 @@ export default function OrdenesCompraPage({ cajero, onVolver }: Props) {
     setLoadingInsumos(true)
     setErrorTabla(false)
     setSinProveedores(false)
+    try {
+      // Cargar insumos con stock bajo
+      const { data: insumos, error: errInsumos } = await supabase
+        .from('inventario')
+        .select('id, nombre, unidad, stock_actual, stock_minimo, costo_unitario')
+        .order('nombre', { ascending: true })
 
-    // Cargar insumos con stock bajo
-    const { data: insumos, error: errInsumos } = await supabase
-      .from('inventario')
-      .select('id, nombre, unidad, stock_actual, stock_minimo, costo_unitario')
-      .order('nombre', { ascending: true })
-
-    if (errInsumos) {
-      if ((errInsumos as any).code === '42P01') {
-        setErrorTabla(true)
-        setLoadingInsumos(false)
+      if (errInsumos) {
+        if ((errInsumos as any).code === '42P01') {
+          setErrorTabla(true)
+        }
         return
       }
-    }
 
-    const stockBajo = (insumos ?? []).filter(
-      (i: Insumo) => Number(i.stock_actual) <= Number(i.stock_minimo)
-    )
-    setInsumosStockBajo(stockBajo)
+      const stockBajo = (insumos ?? []).filter(
+        (i: Insumo) => Number(i.stock_actual) <= Number(i.stock_minimo)
+      )
+      setInsumosStockBajo(stockBajo)
 
-    // Pre-seleccionar todos con déficit
-    const preseleccion: Record<string, ItemSeleccionado> = {}
-    for (const i of stockBajo) {
-      const deficit = Math.max(0, Number(i.stock_minimo) - Number(i.stock_actual))
-      preseleccion[i.id] = { insumo: i, cantidad: deficit || 1, costoUnitario: Number(i.costo_unitario) }
-    }
-    setSeleccionados(preseleccion)
+      // Pre-seleccionar todos con déficit
+      const preseleccion: Record<string, ItemSeleccionado> = {}
+      for (const i of stockBajo) {
+        const deficit = Math.max(0, Number(i.stock_minimo) - Number(i.stock_actual))
+        preseleccion[i.id] = { insumo: i, cantidad: deficit || 1, costoUnitario: Number(i.costo_unitario) }
+      }
+      setSeleccionados(preseleccion)
 
-    // Cargar proveedores activos
-    const { data: provs, error: errProvs } = await supabase
-      .from('proveedores')
-      .select('id, nombre, telefono, correo, categoria, activo')
-      .eq('activo', true)
-      .order('nombre', { ascending: true })
+      // Cargar proveedores activos
+      const { data: provs, error: errProvs } = await supabase
+        .from('proveedores')
+        .select('id, nombre, telefono, correo, categoria, activo')
+        .eq('activo', true)
+        .order('nombre', { ascending: true })
 
-    if (errProvs && (errProvs as any).code === '42P01') {
-      setErrorTabla(true)
+      if (errProvs && (errProvs as any).code === '42P01') {
+        setErrorTabla(true)
+        return
+      }
+
+      if (!provs || provs.length === 0) {
+        setSinProveedores(true)
+      } else {
+        setProveedores(provs)
+        setProveedorId(provs[0].id)
+      }
+    } catch {
+      // error de red
+    } finally {
       setLoadingInsumos(false)
-      return
     }
-
-    if (!provs || provs.length === 0) {
-      setSinProveedores(true)
-    } else {
-      setProveedores(provs)
-      setProveedorId(provs[0].id)
-    }
-
-    setLoadingInsumos(false)
   }
 
   async function cargarHistorial() {
     setLoadingHistorial(true)
-    const { data, error } = await supabase
-      .from('ordenes_compra')
-      .select('*, proveedores(nombre, telefono)')
-      .order('created_at', { ascending: false })
-      .limit(50)
+    try {
+      const { data, error } = await supabase
+        .from('ordenes_compra')
+        .select('*, proveedores(nombre, telefono)')
+        .order('created_at', { ascending: false })
+        .limit(50)
 
-    if (error) {
-      if ((error as any).code === '42P01') setErrorTabla(true)
+      if (error) {
+        if ((error as any).code === '42P01') setErrorTabla(true)
+        return
+      }
+      setHistorial((data ?? []) as OrdenCompra[])
+    } catch {
+      // error de red
+    } finally {
       setLoadingHistorial(false)
-      return
     }
-    setHistorial((data ?? []) as OrdenCompra[])
-    setLoadingHistorial(false)
   }
 
   async function cargarItemsOC(ocId: string) {
     if (expandida === ocId) { setExpandida(null); return }
     setExpandida(ocId)
     setLoadingItems(true)
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('ordenes_compra_items')
       .select('*')
       .eq('orden_compra_id', ocId)
+    if (error) {
+      toast.error('Error al cargar items de la orden')
+      setLoadingItems(false)
+      return
+    }
     setItemsExpandida((data ?? []) as OrdenCompraItem[])
     setLoadingItems(false)
   }
@@ -204,6 +215,7 @@ export default function OrdenesCompraPage({ cajero, onVolver }: Props) {
   const totalOC = itemsSeleccionados.reduce((s, it) => s + it.cantidad * it.costoUnitario, 0)
 
   async function generarOC() {
+    if (guardando) return
     if (!proveedorId) { setMsg({ text: 'Selecciona un proveedor', tipo: 'error' }); return }
     if (itemsSeleccionados.length === 0) { setMsg({ text: 'Selecciona al menos un insumo', tipo: 'error' }); return }
 
@@ -274,7 +286,7 @@ export default function OrdenesCompraPage({ cajero, onVolver }: Props) {
     t.sep()
     for (const it of oc.items) {
       const nom     = it.insumo.nombre.slice(0, 20).padEnd(20)
-      const cant    = `${it.cantidad}${it.insumo.unidad}`.slice(0, 6).padStart(6)
+      const cant    = `${it.cantidad}${it.insumo.unidad ?? ''}`.slice(0, 6).padStart(6)
       const subtot  = `$${(it.cantidad * it.costoUnitario).toFixed(2)}`.padStart(9)
       t.linea(`${nom} ${cant} ${subtot}`)
     }
@@ -294,7 +306,7 @@ export default function OrdenesCompraPage({ cajero, onVolver }: Props) {
     if (!tel) { setMsg({ text: 'El proveedor no tiene teléfono registrado', tipo: 'error' }); return }
 
     const lineas = ocGenerada.items.map(
-      it => `• ${it.insumo.nombre}: ${it.cantidad} ${it.insumo.unidad} × $${it.costoUnitario.toFixed(2)} = $${(it.cantidad * it.costoUnitario).toFixed(2)}`
+      it => `• ${it.insumo.nombre}: ${it.cantidad} ${it.insumo.unidad ?? ''} × $${it.costoUnitario.toFixed(2)} = $${(it.cantidad * it.costoUnitario).toFixed(2)}`
     ).join('\n')
 
     const mensaje = encodeURIComponent(
@@ -311,43 +323,80 @@ export default function OrdenesCompraPage({ cajero, onVolver }: Props) {
   }
 
   async function marcarRecibida(ocId: string) {
+    if (marcando) return
     if (!confirm('¿Marcar como recibida y actualizar el inventario?')) return
     setMarcando(ocId)
 
-    // Cargar items de la OC
-    const { data: items } = await supabase
-      .from('ordenes_compra_items')
-      .select('*')
-      .eq('orden_compra_id', ocId)
+    try {
+      // Intentar RPC atómico primero
+      const { data: rpcData, error: rpcErr } = await supabase.rpc('recibir_orden_compra', { p_oc_id: ocId })
+      if (!rpcErr && (rpcData as any)?.ok) {
+        toast.success('Orden recibida e inventario actualizado')
+        setMarcando(null)
+        cargarHistorial()
+        if (expandida === ocId) setExpandida(null)
+        return
+      }
 
-    if (items && items.length > 0) {
-      for (const item of items as OrdenCompraItem[]) {
-        // Obtener stock actual
-        const { data: inv } = await supabase
-          .from('inventario')
-          .select('stock_actual')
-          .eq('id', item.inventario_id)
-          .single()
+      // Fallback: loop manual — solo marca OC si TODOS los items actualizan correctamente
+      const { data: items, error: itemsError } = await supabase
+        .from('ordenes_compra_items')
+        .select('*')
+        .eq('orden_compra_id', ocId)
 
-        if (inv) {
+      if (itemsError) {
+        toast.error('Error al cargar items de la OC')
+        setMarcando(null)
+        return
+      }
+
+      if (items && items.length > 0) {
+        for (const item of items as OrdenCompraItem[]) {
+          // Obtener stock actual
+          const { data: inv, error: invError } = await supabase
+            .from('inventario')
+            .select('stock_actual')
+            .eq('id', item.inventario_id)
+            .single()
+
+          if (invError || !inv) {
+            toast.error(`Error al leer stock del insumo ${item.inventario_id}`)
+            setMarcando(null)
+            return
+          }
+
           const nuevoStock = Number(inv.stock_actual) + Number(item.cantidad_solicitada)
-          await supabase
+          const { error: updateError } = await supabase
             .from('inventario')
             .update({ stock_actual: nuevoStock })
             .eq('id', item.inventario_id)
+
+          if (updateError) {
+            toast.error('Error al actualizar inventario — OC no marcada como recibida para evitar inconsistencias')
+            setMarcando(null)
+            return
+          }
         }
       }
-    }
 
-    await supabase
-      .from('ordenes_compra')
-      .update({ estado: 'recibida' })
-      .eq('id', ocId)
+      const { error: ocError } = await supabase
+        .from('ordenes_compra')
+        .update({ estado: 'recibida' })
+        .eq('id', ocId)
 
-    setMarcando(null)
-    cargarHistorial()
-    if (expandida === ocId) {
-      setExpandida(null)
+      if (ocError) {
+        toast.error('Error al marcar OC como recibida')
+        setMarcando(null)
+        return
+      }
+
+      toast.success('Orden recibida e inventario actualizado')
+      setMarcando(null)
+      cargarHistorial()
+      if (expandida === ocId) setExpandida(null)
+    } catch (err: any) {
+      toast.error('Error inesperado: ' + (err?.message ?? 'desconocido'))
+      setMarcando(null)
     }
   }
 

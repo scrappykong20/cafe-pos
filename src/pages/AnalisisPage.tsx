@@ -59,13 +59,25 @@ function TabRentabilidad() {
   useEffect(() => {
     async function cargar() {
       setLoading(true)
-      const [{ data: menu }, { data: items }] = await Promise.all([
-        supabase.from('menu').select('id,nombre,precio,emoji'),
-        supabase.from('venta_items').select('nombre,precio,cantidad'),
-      ])
-      setMenuItems(menu ?? [])
-      setVentaItems(items ?? [])
-      setLoading(false)
+      try {
+        const hace30dias = new Date()
+        hace30dias.setDate(hace30dias.getDate() - 30)
+        const [menuRes, itemsRes] = await Promise.all([
+          supabase.from('menu').select('id,nombre,precio,emoji'),
+          supabase.from('venta_items').select('nombre,precio,cantidad').gte('created_at', hace30dias.toISOString()),
+        ])
+        if (menuRes.error || itemsRes.error) {
+          return
+        }
+        const menu = menuRes.data ?? []
+        const items = itemsRes.data ?? []
+        setMenuItems(menu)
+        setVentaItems(items)
+      } catch {
+        // error de red
+      } finally {
+        setLoading(false)
+      }
     }
     cargar()
   }, [])
@@ -85,9 +97,10 @@ function TabRentabilidad() {
 
   const rows: ProdRent[] = menuItems.map(m => {
     const costo = costos[m.nombre] ?? 0
-    const margen = m.precio > 0 ? ((m.precio - costo) / m.precio) * 100 : 0
-    const v = ventaMap.get(m.nombre) ?? { cantidad: 0, precio: m.precio }
-    const ganancia = (m.precio - costo) * v.cantidad
+    const precio = Number(m.precio) || 0
+    const margen = precio > 0 ? ((precio - costo) / precio) * 100 : 0
+    const v = ventaMap.get(m.nombre) ?? { cantidad: 0, precio }
+    const ganancia = (precio - costo) * (Number(v.cantidad) || 0)
     return {
       nombre: m.nombre,
       emoji: m.emoji ?? '🍽️',
@@ -167,41 +180,53 @@ function TabABC() {
   useEffect(() => {
     async function cargar() {
       setLoading(true)
-      const { data } = await supabase
-        .from('venta_items')
-        .select('nombre,emoji,precio,cantidad,ventas!inner(estado)')
-        .eq('ventas.estado', 'completada')
+      try {
+        const hace30diasABC = new Date()
+        hace30diasABC.setDate(hace30diasABC.getDate() - 30)
+        const { data, error } = await supabase
+          .from('venta_items')
+          .select('nombre,emoji,precio,cantidad,ventas!inner(estado)')
+          .eq('ventas.estado', 'completada')
+          .gte('created_at', hace30diasABC.toISOString())
 
-      const prodMap = new Map<string, { revenue: number; emoji: string }>()
-      for (const item of (data ?? []) as any[]) {
-        const prev = prodMap.get(item.nombre) ?? { revenue: 0, emoji: item.emoji ?? '🍽️' }
-        prodMap.set(item.nombre, {
-          revenue: prev.revenue + (item.precio * item.cantidad),
-          emoji: prev.emoji,
+        if (error) {
+          return
+        }
+
+        const prodMap = new Map<string, { revenue: number; emoji: string }>()
+        for (const item of (data ?? []) as any[]) {
+          const prev = prodMap.get(item.nombre) ?? { revenue: 0, emoji: item.emoji ?? '🍽️' }
+          prodMap.set(item.nombre, {
+            revenue: prev.revenue + ((Number(item.precio) || 0) * (Number(item.cantidad) || 0)),
+            emoji: prev.emoji,
+          })
+        }
+
+        const sorted = Array.from(prodMap.entries())
+          .map(([nombre, v]) => ({ nombre, ...v }))
+          .sort((a, b) => b.revenue - a.revenue)
+
+        const totalRev = sorted.reduce((s, r) => s + r.revenue, 0)
+        let acum = 0
+        let revA = 0, revB = 0, revC = 0
+
+        const result: ABCRow[] = sorted.map(r => {
+          acum += r.revenue
+          const pctAcum = totalRev > 0 ? (acum / totalRev) * 100 : 0
+          const clase: 'A' | 'B' | 'C' = pctAcum <= 70 ? 'A' : pctAcum <= 90 ? 'B' : 'C'
+          if (clase === 'A') revA += r.revenue
+          else if (clase === 'B') revB += r.revenue
+          else revC += r.revenue
+          return { nombre: r.nombre, emoji: r.emoji, revenue: r.revenue, pctAcum, clase }
         })
+
+        setRows(result)
+        setTotales({ a: revA, b: revB, c: revC, total: totalRev })
+      } catch {
+        // error de red
+      } finally {
+        setLoading(false)
       }
-
-      const sorted = Array.from(prodMap.entries())
-        .map(([nombre, v]) => ({ nombre, ...v }))
-        .sort((a, b) => b.revenue - a.revenue)
-
-      const totalRev = sorted.reduce((s, r) => s + r.revenue, 0)
-      let acum = 0
-      let revA = 0, revB = 0, revC = 0
-
-      const result: ABCRow[] = sorted.map(r => {
-        acum += r.revenue
-        const pctAcum = totalRev > 0 ? (acum / totalRev) * 100 : 0
-        const clase: 'A' | 'B' | 'C' = pctAcum <= 70 ? 'A' : pctAcum <= 90 ? 'B' : 'C'
-        if (clase === 'A') revA += r.revenue
-        else if (clase === 'B') revB += r.revenue
-        else revC += r.revenue
-        return { nombre: r.nombre, emoji: r.emoji, revenue: r.revenue, pctAcum, clase }
-      })
-
-      setRows(result)
-      setTotales({ a: revA, b: revB, c: revC, total: totalRev })
-      setLoading(false)
     }
     cargar()
   }, [])
@@ -316,37 +341,44 @@ function TabHorasPico() {
   useEffect(() => {
     async function cargar() {
       setLoading(true)
-      const hace30 = new Date(Date.now() - 30 * 86400000).toISOString()
-      const { data } = await supabase
-        .from('ventas')
-        .select('total,created_at')
-        .eq('estado', 'completada')
-        .gte('created_at', hace30)
+      try {
+        const hace30 = new Date(Date.now() - 30 * 86400000).toISOString()
+        const { data, error } = await supabase
+          .from('ventas')
+          .select('total,created_at')
+          .eq('estado', 'completada')
+          .gte('created_at', hace30)
 
-      const map = new Map<string, number>()
-      for (const v of (data ?? [])) {
-        const d = new Date(v.created_at)
-        // JS getDay: 0=Dom, 1=Lun … 6=Sáb → convert to 0=Lun..6=Dom
-        const jsDay = d.getDay()
-        const day = jsDay === 0 ? 6 : jsDay - 1
-        const hour = d.getHours()
-        if (hour < 6 || hour > 22) continue
-        const key = `${day}-${hour}`
-        map.set(key, (map.get(key) ?? 0) + (v.total ?? 0))
-      }
+        if (error) return
 
-      const allCells: HeatCell[] = []
-      let mx = 0
-      for (let day = 0; day < 7; day++) {
-        for (const hour of HOURS) {
-          const total = map.get(`${day}-${hour}`) ?? 0
-          if (total > mx) mx = total
-          allCells.push({ day, hour, total })
+        const map = new Map<string, number>()
+        for (const v of (data ?? [])) {
+          const d = new Date(v.created_at)
+          // JS getDay: 0=Dom, 1=Lun … 6=Sáb → convert to 0=Lun..6=Dom
+          const jsDay = d.getDay()
+          const day = jsDay === 0 ? 6 : jsDay - 1
+          const hour = d.getHours()
+          if (hour < 6 || hour > 22) continue
+          const key = `${day}-${hour}`
+          map.set(key, (map.get(key) ?? 0) + (v.total ?? 0))
         }
+
+        const allCells: HeatCell[] = []
+        let mx = 0
+        for (let day = 0; day < 7; day++) {
+          for (const hour of HOURS) {
+            const total = map.get(`${day}-${hour}`) ?? 0
+            if (total > mx) mx = total
+            allCells.push({ day, hour, total })
+          }
+        }
+        setCells(allCells)
+        setMaxVal(mx || 1)
+      } catch {
+        // error de red
+      } finally {
+        setLoading(false)
       }
-      setCells(allCells)
-      setMaxVal(mx || 1)
-      setLoading(false)
     }
     cargar()
   }, [])
@@ -453,35 +485,42 @@ function TabCajeros({ periodo, setPeriodo }: { periodo: Periodo; setPeriodo: (p:
 
   const cargar = useCallback(async () => {
     setLoading(true)
-    const ahora = new Date()
-    const hoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate())
+    try {
+      const ahora = new Date()
+      const hoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate())
 
-    let desde: string
-    if (periodo === 'hoy') desde = hoy.toISOString()
-    else if (periodo === 'semana') desde = new Date(hoy.getTime() - hoy.getDay() * 86400000).toISOString()
-    else desde = new Date(ahora.getFullYear(), ahora.getMonth(), 1).toISOString()
+      let desde: string
+      if (periodo === 'hoy') desde = hoy.toISOString()
+      else if (periodo === 'semana') desde = new Date(hoy.getTime() - hoy.getDay() * 86400000).toISOString()
+      else desde = new Date(ahora.getFullYear(), ahora.getMonth(), 1).toISOString()
 
-    const { data } = await supabase
-      .from('ventas')
-      .select('cajero_nombre,total,metodo_pago,created_at')
-      .eq('estado', 'completada')
-      .gte('created_at', desde)
+      const { data, error } = await supabase
+        .from('ventas')
+        .select('cajero_nombre,total,metodo_pago,created_at')
+        .eq('estado', 'completada')
+        .gte('created_at', desde)
 
-    const map = new Map<string, CajeroRow>()
-    for (const v of (data ?? [])) {
-      const nombre = v.cajero_nombre ?? 'Desconocido'
-      const prev = map.get(nombre) ?? { nombre, ventas: 0, total: 0, efectivo: 0, tarjeta: 0 }
-      map.set(nombre, {
-        ...prev,
-        ventas: prev.ventas + 1,
-        total: prev.total + (v.total ?? 0),
-        efectivo: prev.efectivo + (v.metodo_pago === 'efectivo' ? 1 : 0),
-        tarjeta: prev.tarjeta + (v.metodo_pago === 'tarjeta' ? 1 : 0),
-      })
+      if (error) return
+
+      const map = new Map<string, CajeroRow>()
+      for (const v of (data ?? [])) {
+        const nombre = v.cajero_nombre ?? 'Desconocido'
+        const prev = map.get(nombre) ?? { nombre, ventas: 0, total: 0, efectivo: 0, tarjeta: 0 }
+        map.set(nombre, {
+          ...prev,
+          ventas: prev.ventas + 1,
+          total: prev.total + (v.total ?? 0),
+          efectivo: prev.efectivo + (v.metodo_pago === 'efectivo' ? 1 : 0),
+          tarjeta: prev.tarjeta + (v.metodo_pago === 'tarjeta' ? 1 : 0),
+        })
+      }
+
+      setRows(Array.from(map.values()).sort((a, b) => b.total - a.total))
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
     }
-
-    setRows(Array.from(map.values()).sort((a, b) => b.total - a.total))
-    setLoading(false)
   }, [periodo])
 
   useEffect(() => { cargar() }, [cargar])

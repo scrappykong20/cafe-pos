@@ -18,7 +18,8 @@ export default function QRScannerModal({ onScan, onClose }: Props) {
 
   // ── Foco automático al abrir (el lector USB escribe aquí directamente) ──────
   useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 80)
+    const id = setTimeout(() => inputRef.current?.focus(), 80)
+    return () => clearTimeout(id)
   }, [])
 
   // ── Captura la tecla Enter del lector USB ────────────────────────────────────

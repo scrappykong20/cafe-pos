@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 
 interface Props { cajero: CajeroActivo; onVolver: () => void }
@@ -29,13 +30,20 @@ export default function CuponesPage({ cajero: _cajero, onVolver }: Props) {
 
   async function cargar() {
     setLoading(true)
-    const { data } = await supabase.from('cupones').select('*').order('created_at', { ascending: false })
-    setCupones((data as Cupon[]) ?? [])
-    setLoading(false)
+    try {
+      const { data, error } = await supabase.from('cupones').select('*').order('created_at', { ascending: false })
+      if (error) { toast.error('Error al cargar cupones'); return }
+      setCupones((data as Cupon[]) ?? [])
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function crear(e: React.FormEvent) {
     e.preventDefault()
+    if (guardando) return
     const v = parseFloat(valor)
     if (!codigo.trim() || isNaN(v) || v <= 0) return
     setGuardando(true)
@@ -50,20 +58,21 @@ export default function CuponesPage({ cajero: _cajero, onVolver }: Props) {
       activo: true,
     })
     setGuardando(false)
-    if (!error) {
-      setCodigo(generarCodigo()); setDescripcion(''); setValor(''); setUsosMax('1'); setValidoDesde(''); setValidoHasta('')
-      setShowNuevo(false); cargar()
-    }
+    if (error) { toast.error('Error al crear cupón: ' + error.message); return }
+    setCodigo(generarCodigo()); setDescripcion(''); setValor(''); setUsosMax('1'); setValidoDesde(''); setValidoHasta('')
+    setShowNuevo(false); cargar()
   }
 
   async function toggleActivo(cupon: Cupon) {
-    await supabase.from('cupones').update({ activo: !cupon.activo }).eq('id', cupon.id)
+    const { error } = await supabase.from('cupones').update({ activo: !cupon.activo }).eq('id', cupon.id)
+    if (error) { toast.error('Error al actualizar cupón'); return }
     cargar()
   }
 
   async function eliminar(id: string) {
     if (!confirm('¿Eliminar este cupón?')) return
-    await supabase.from('cupones').delete().eq('id', id)
+    const { error } = await supabase.from('cupones').delete().eq('id', id)
+    if (error) { toast.error('Error al eliminar cupón'); return }
     cargar()
   }
 

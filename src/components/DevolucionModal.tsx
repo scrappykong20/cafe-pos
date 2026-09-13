@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import { supabase } from '../supabase'
 import toast from 'react-hot-toast'
 
@@ -61,6 +61,7 @@ export default function DevolucionModal({ venta, cajero, onClose, onCompletado }
   const [motivo, setMotivo] = useState<string>(MOTIVOS[0])
   const [metodoDevolucion, setMetodoDevolucion] = useState<string>('efectivo')
   const [loading, setLoading] = useState(false)
+  const procesandoRef = useRef(false)
 
   // Calcular total a devolver
   const totalDevolver = tieneItems
@@ -78,6 +79,7 @@ export default function DevolucionModal({ venta, cajero, onClose, onCompletado }
   }
 
   async function confirmar() {
+    if (procesandoRef.current) return
     if (totalDevolver <= 0) {
       toast.error('El monto a devolver debe ser mayor a $0')
       return
@@ -87,6 +89,7 @@ export default function DevolucionModal({ venta, cajero, onClose, onCompletado }
       return
     }
 
+    procesandoRef.current = true
     setLoading(true)
 
     try {
@@ -112,45 +115,44 @@ export default function DevolucionModal({ venta, cajero, onClose, onCompletado }
         return
       }
 
-      // UPDATE ventas SET devuelta=true (silencioso si la columna no existe)
-      try {
-        await supabase.from('ventas').update({ devuelta: true }).eq('id', venta.id)
-      } catch (_e) {
-        // silencioso
+      // UPDATE ventas SET devuelta=true
+      const { error: devueltaErr } = await supabase.from('ventas').update({ devuelta: true }).eq('id', venta.id)
+      if (devueltaErr) {
+        console.error('devuelta update failed:', devueltaErr.message)
+        toast.error('Error al marcar venta como devuelta')
+        setLoading(false)
+        return
       }
 
       // Restar engranajes si el cliente los ganó con esta venta
-      try {
-        const { data: ventaData } = await supabase
-          .from('ventas')
-          .select('usuario_id, engranajes_ganados')
-          .eq('id', venta.id)
-          .single()
+      const { data: ventaData, error: ventaErr } = await supabase
+        .from('ventas')
+        .select('usuario_id, engranajes_ganados')
+        .eq('id', venta.id)
+        .maybeSingle()
 
-        if (
-          ventaData &&
-          ventaData.usuario_id &&
-          (ventaData.engranajes_ganados ?? 0) > 0
-        ) {
-          const { data: perfil } = await supabase
+      if (ventaErr) {
+        console.error('Error al leer venta para revertir engranajes:', ventaErr.message)
+      } else if (ventaData?.usuario_id && (ventaData.engranajes_ganados ?? 0) > 0) {
+        const { data: perfil, error: perfilErr } = await supabase
+          .from('usuarios')
+          .select('engranajes')
+          .eq('id', ventaData.usuario_id)
+          .maybeSingle()
+
+        if (perfilErr) {
+          console.error('Error al leer perfil para revertir engranajes:', perfilErr.message)
+        } else if (perfil) {
+          const nuevosEngranajes = Math.max(0, (perfil.engranajes ?? 0) - ventaData.engranajes_ganados)
+          const { error: engErr } = await supabase
             .from('usuarios')
-            .select('engranajes')
+            .update({ engranajes: nuevosEngranajes })
             .eq('id', ventaData.usuario_id)
-            .single()
-
-          if (perfil) {
-            const nuevosEngranajes = Math.max(
-              0,
-              (perfil.engranajes ?? 0) - ventaData.engranajes_ganados
-            )
-            await supabase
-              .from('usuarios')
-              .update({ engranajes: nuevosEngranajes })
-              .eq('id', ventaData.usuario_id)
+          if (engErr) {
+            toast.error('Error al revertir engranajes: ' + engErr.message)
+            return
           }
         }
-      } catch (_e) {
-        // silencioso
       }
 
       toast.success('Devolución registrada')
@@ -159,6 +161,9 @@ export default function DevolucionModal({ venta, cajero, onClose, onCompletado }
       console.error('Error inesperado en devolución:', e)
       toast.error('Error inesperado')
       setLoading(false)
+      procesandoRef.current = false
+    } finally {
+      procesandoRef.current = false
     }
   }
 

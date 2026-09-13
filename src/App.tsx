@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { supabase } from './supabase'
 import CanjeQRModal from './components/CanjeQRModal'
 import PinLoginPage from './pages/PinLoginPage'
@@ -25,9 +25,12 @@ import RecetasPage from './pages/RecetasPage'
 import OrdenesCompraPage from './pages/OrdenesCompraPage'
 import ModificadoresAdminPage from './pages/ModificadoresAdminPage'
 import AperturaCajaPage from './pages/AperturaCajaPage'
+import FiadosPage from './pages/FiadosPage'
 import toast from 'react-hot-toast'
 import { registrarAccion } from './services/auditLog'
-import { crearTicket, imprimirPorTipo, hayImpresora } from './services/printer'
+import { crearTicket, imprimirPorTipo, hayImpresora, listarImpresoras, getSlot, setSlot } from './services/printer'
+import { useOnlineStatus } from './hooks/useOnlineStatus'
+import { syncOfflineQueue, getPendingCount, clearSynced } from './services/offlineQueue'
 
 export interface CajeroActivo {
   id: string
@@ -40,7 +43,7 @@ export interface CajeroActivo {
   turno: 'mañana' | 'tarde'
 }
 
-type Screen = 'tipo' | 'apertura_caja' | 'mesas' | 'orden' | 'cocina' | 'reportes' | 'corte' | 'historial' | 'inventario' | 'reservaciones' | 'turnos' | 'configuracion' | 'analisis' | 'gastos' | 'adelantos' | 'cupones' | 'happyhours' | 'menueditor' | 'dashboard' | 'recetas' | 'ordenes_compra' | 'modificadores_admin'
+type Screen = 'tipo' | 'apertura_caja' | 'mesas' | 'orden' | 'cocina' | 'reportes' | 'corte' | 'historial' | 'inventario' | 'reservaciones' | 'turnos' | 'configuracion' | 'analisis' | 'gastos' | 'adelantos' | 'cupones' | 'happyhours' | 'menueditor' | 'dashboard' | 'recetas' | 'ordenes_compra' | 'modificadores_admin' | 'fiados'
 export type TipoOrden = 'llevar' | 'comedor' | 'empleado'
 
 const INACTIVIDAD_SEGUNDOS = 300 // 5 minutos
@@ -59,12 +62,15 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(true)
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showCanjeModal, setShowCanjeModal] = useState(false)
+  const [showSalirModal, setShowSalirModal] = useState(false)
   const [turnoStats, setTurnoStats] = useState<{ total: number; ventas: number } | null>(null)
   const [showModalEmpleado, setShowModalEmpleado] = useState(false)
   const [listaPersonal, setListaPersonal] = useState<{ id: string; nombre: string; apellido: string; rol: string }[]>([])
   const [connected, setConnected] = useState(true)
+  const [pendingOffline, setPendingOffline] = useState(0)
   const inactividadRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const online = useOnlineStatus()
 
   // Realtime connection monitor
   useEffect(() => {
@@ -73,6 +79,21 @@ export default function App() {
     })
     return () => { supabase.removeChannel(ch) }
   }, [])
+
+  // Sincronizar ventas offline cuando vuelve la conexión
+  useEffect(() => {
+    setPendingOffline(getPendingCount())
+    if (!online) return
+    const pending = getPendingCount()
+    if (pending === 0) return
+    syncOfflineQueue().then(synced => {
+      if (synced > 0) {
+        clearSynced()
+        setPendingOffline(0)
+        toast.success(`✅ ${synced} venta${synced > 1 ? 's' : ''} sincronizada${synced > 1 ? 's' : ''} con éxito`)
+      }
+    })
+  }, [online])
 
   // Realtime + polling: actualizar cajero activo si cambia su rol en la BD
   useEffect(() => {
@@ -85,17 +106,17 @@ export default function App() {
         setScreen('tipo')
         return
       }
-      const nuevoRol = updated.rol ?? activeCajero!.rol
       setActiveCajero(prev => {
         if (!prev) return null
+        const nuevoRol = updated.rol ?? prev.rol
         if (prev.rol === nuevoRol && prev.nombre === (updated.nombre ?? prev.nombre)) return prev
         return {
           ...prev,
           rol: nuevoRol,
           nombre: updated.nombre ?? prev.nombre,
           last_name: updated.apellido ?? prev.last_name,
-          es_admin: nuevoRol === 'admin',
-          es_cajero: nuevoRol === 'cajero' || nuevoRol === 'admin',
+          es_admin:  ['admin', 'gerente'].includes(nuevoRol),
+          es_cajero: ['admin', 'gerente', 'cajero', 'mesero', 'barista'].includes(nuevoRol),
         }
       })
     }
@@ -120,7 +141,7 @@ export default function App() {
         .from('personal')
         .select('rol, nombre, apellido, activo')
         .eq('id', activeCajero.id)
-        .single()
+        .maybeSingle()
       if (data) aplicarCambio(data)
     }, 15000)
 
@@ -131,7 +152,18 @@ export default function App() {
   }, [activeCajero?.id])
 
   // ─── Bloqueo por inactividad ──────────────────────────────────────
-  function resetInactividad() {
+  const bloquear = useCallback(() => {
+    setActiveCajero(null)
+    setScreen('tipo')
+    setMesaId(null)
+    setMesaNombre('')
+    setShowInactividadWarning(false)
+    if (inactividadRef.current) clearTimeout(inactividadRef.current)
+    if (countdownRef.current) clearInterval(countdownRef.current)
+    toast('Sesión cerrada por inactividad', { icon: '🔒' })
+  }, [])
+
+  const resetInactividad = useCallback(() => {
     setShowInactividadWarning(false)
     setSecondsLeft(INACTIVIDAD_SEGUNDOS)
     if (inactividadRef.current) clearTimeout(inactividadRef.current)
@@ -155,18 +187,7 @@ export default function App() {
     }, (INACTIVIDAD_SEGUNDOS - ADVERTENCIA_SEGUNDOS) * 1000)
 
     inactividadRef.current = warningTimeout
-  }
-
-  function bloquear() {
-    setActiveCajero(null)
-    setScreen('tipo')
-    setMesaId(null)
-    setMesaNombre('')
-    setShowInactividadWarning(false)
-    if (inactividadRef.current) clearTimeout(inactividadRef.current)
-    if (countdownRef.current) clearInterval(countdownRef.current)
-    toast('Sesión cerrada por inactividad', { icon: '🔒' })
-  }
+  }, [activeCajero, bloquear])
 
   useEffect(() => {
     const eventos = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
@@ -177,51 +198,102 @@ export default function App() {
       if (inactividadRef.current) clearTimeout(inactividadRef.current)
       if (countdownRef.current) clearInterval(countdownRef.current)
     }
-  }, [activeCajero])
+  }, [resetInactividad])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light')
   }, [darkMode])
 
-  // ─── Auth ────────────────────────────────────────────────────────
+  // Guard de seguridad para pantallas de admin — ejecutado en useEffect para
+  // no llamar toast/setScreen durante el render (viola reglas de React)
+  const ADMIN_SCREENS = ['reportes', 'turnos', 'configuracion', 'analisis', 'cupones', 'happyhours', 'menueditor', 'dashboard', 'recetas', 'modificadores_admin']
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSesionActiva(!!session)
-      setLoading(false)
-    })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSesionActiva(!!session)
-      if (!session) {
-        setActiveCajero(null)
-        setScreen('tipo')
-        setMesaId(null)
-        setMesaNombre('')
+    if (ADMIN_SCREENS.includes(screen) && !activeCajero?.es_admin) {
+      toast.error('Acceso denegado')
+      volverATipo()
+    }
+  }, [screen, activeCajero]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── Auth ────────────────────────────────────────────────────────
+  // El POS firma automáticamente con la cuenta de servicio del terminal.
+  // Esto establece una sesión "authenticated" para que las políticas RLS
+  // de Supabase permitan el acceso a las tablas del negocio.
+  // La seguridad operativa está en el PIN de cada cajero.
+  useEffect(() => {
+    async function iniciarSesionPOS() {
+      try {
+        // Recuperar sesión existente (si el app se suspendió)
+        const { data: { session } } = await supabase.auth.getSession()
+        if (session) {
+          setSesionActiva(true)
+          setLoading(false)
+          return
+        }
+        // Iniciar sesión con cuenta de servicio del terminal POS
+        const posEmail    = import.meta.env.VITE_POS_EMAIL    as string | undefined
+        const posPassword = import.meta.env.VITE_POS_PASSWORD as string | undefined
+        if (posEmail && posPassword) {
+          const { error } = await supabase.auth.signInWithPassword({
+            email: posEmail,
+            password: posPassword,
+          })
+          if (error) {
+            console.error('[POS] Error al iniciar sesión de servicio:', error.message)
+            toast.error('Error de conexión con el servidor — verifica credenciales POS')
+          }
+        } else {
+          console.warn('[POS] VITE_POS_EMAIL / VITE_POS_PASSWORD no configurados — algunas funciones pueden fallar')
+        }
+      } catch (err) {
+        console.error('[POS] Error inesperado en auth:', err)
+      } finally {
+        setSesionActiva(true)
+        setLoading(false)
       }
-    })
-    return () => subscription.unsubscribe()
+    }
+    iniciarSesionPOS()
   }, [])
 
   async function handleLogin(loginResult: { id: string; nombre: string; last_name: string; rol: string; turno: 'mañana' | 'tarde' }) {
+    const ROL_ADMIN  = ['admin', 'gerente']
+    const ROL_CAJERO = ['admin', 'gerente', 'cajero', 'mesero', 'barista']
     const cajero: CajeroActivo = {
       ...loginResult,
-      es_admin: loginResult.rol === 'admin',
-      es_cajero: loginResult.rol === 'cajero' || loginResult.rol === 'admin',
+      es_admin:  ROL_ADMIN.includes(loginResult.rol),
+      es_cajero: ROL_CAJERO.includes(loginResult.rol),
     }
-    if (!cajero.es_cajero && !cajero.es_admin) {
+    if (!cajero.es_cajero) {
       toast.error(`Rol "${loginResult.rol}" no tiene acceso al POS`)
       return
     }
+
     setActiveCajero(cajero)
     toast.success(`Bienvenido, ${cajero.nombre}`)
 
-    // Verificar si ya hay una caja abierta hoy para este cajero
+    // Auto-detectar impresora si no hay ninguna configurada
+    if (!hayImpresora('caja')) {
+      listarImpresoras().then(lista => {
+        const epson = lista.find(p =>
+          p.toLowerCase().includes('tm-t') ||
+          p.toLowerCase().includes('receipt') ||
+          p.toLowerCase().includes('epson')
+        )
+        if (epson && !getSlot(1).nombre && !getSlot(1).ip) {
+          setSlot(1, { tipo: 'caja', modo: 'cable', nombre: epson, ip: '' })
+          toast.success(`Impresora detectada: ${epson}`, { duration: 3000 })
+        }
+      }).catch(() => {})
+    }
+
+    // Verificar si ya hay UNA CAJA ABIERTA HOY (de cualquier cajero)
+    // Si alguien ya abrió caja, los demás cajeros no necesitan volver a abrirla
     const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
     const { data: cajaAbierta } = await supabase
       .from('cortes_caja')
       .select('id')
-      .eq('cajero_id', cajero.id)
       .eq('estado', 'abierto')
       .gte('apertura_at', hoy.toISOString())
+      .limit(1)
       .maybeSingle()
 
     if (cajaAbierta) {
@@ -279,12 +351,14 @@ export default function App() {
   function volverATipo() { setScreen('tipo'); setMesaId(null); setMesaNombre('') }
   function volverAMesas() { setScreen('mesas'); setMesaId(null); setMesaNombre('') }
   async function solicitarCambiarCajero() {
+    if (!activeCajero) return
     // Cargar stats del turno de hoy para mostrar en el modal
     const hoy = new Date(); hoy.setHours(0,0,0,0)
     const { data } = await supabase.from('ventas')
       .select('total')
       .gte('created_at', hoy.toISOString())
       .eq('estado', 'completada')
+      .eq('cajero_nombre', `${activeCajero.nombre} ${activeCajero.last_name}`)
     const stats = { ventas: data?.length ?? 0, total: (data ?? []).reduce((s: number, v: any) => s + Number(v.total), 0) }
     setTurnoStats(stats)
     setShowLogoutConfirm(true)
@@ -343,6 +417,7 @@ export default function App() {
     setScreen('recetas')
   }
   function irAOrdenesCompra() { setScreen('ordenes_compra') }
+  function irAFiados() { setScreen('fiados') }
   function irAModificadores() {
     if (!activeCajero?.es_admin) { toast.error('Solo administradores pueden gestionar modificadores'); return }
     setScreen('modificadores_admin')
@@ -370,6 +445,33 @@ export default function App() {
     return <PinLoginPage onLogin={handleLogin} sesionActiva={sesionActiva} />
   }
 
+  // Banner offline — siempre visible cuando no hay internet
+  const OfflineBanner = !online ? (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 99999,
+      background: '#b45309', color: '#fff',
+      padding: '6px 16px', textAlign: 'center',
+      fontWeight: 900, fontSize: '0.72rem', letterSpacing: '0.15em',
+      textTransform: 'uppercase', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+    }}>
+      <span>📶</span>
+      <span>MODO OFFLINE — Las ventas se guardan localmente y se sincronizan al reconectarse</span>
+      {pendingOffline > 0 && <span style={{ background: '#92400e', padding: '2px 8px', borderRadius: 4 }}>
+        {pendingOffline} pendiente{pendingOffline > 1 ? 's' : ''}
+      </span>}
+    </div>
+  ) : pendingOffline > 0 ? (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 99999,
+      background: '#065f46', color: '#fff',
+      padding: '6px 16px', textAlign: 'center',
+      fontWeight: 900, fontSize: '0.72rem', letterSpacing: '0.15em',
+      textTransform: 'uppercase',
+    }}>
+      ⚙️ Sincronizando {pendingOffline} venta{pendingOffline > 1 ? 's' : ''} offline...
+    </div>
+  ) : null
+
   if (screen === 'apertura_caja') {
     return (
       <AperturaCajaPage
@@ -383,6 +485,7 @@ export default function App() {
   if (screen === 'orden') {
     return (
       <>
+        {OfflineBanner}
         <OrdenPage
           mesaId={mesaId}
           mesaNombre={mesaNombre}
@@ -406,6 +509,7 @@ export default function App() {
   if (screen === 'mesas') {
     return (
       <>
+        {OfflineBanner}
         <MesasPage cajero={activeCajero} onAbrirMesa={abrirMesa} onCambiarCajero={solicitarCambiarCajero} onVolver={volverATipo} />
         {showInactividadWarning && <InactividadWarning secondsLeft={secondsLeft} onContinuar={resetInactividad} onBloquear={bloquear} />}
         {showLogoutConfirm && activeCajero && (
@@ -425,12 +529,7 @@ export default function App() {
   }
 
   if (screen === 'reportes') {
-    // A2 — guard de seguridad en render
-    if (!activeCajero?.es_admin) {
-      toast.error('Acceso denegado')
-      volverATipo()
-      return null
-    }
+    if (!activeCajero?.es_admin) return null
     return <ReportesPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
@@ -451,22 +550,17 @@ export default function App() {
   }
 
   if (screen === 'turnos') {
-    // guard de seguridad en render
-    if (!activeCajero?.es_admin) {
-      toast.error('Acceso denegado')
-      volverATipo()
-      return null
-    }
+    if (!activeCajero?.es_admin) return null
     return <TurnosPage cajero={activeCajero} onClose={() => setScreen('mesas')} />
   }
 
   if (screen === 'configuracion') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <ConfiguracionPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
   if (screen === 'analisis') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <AnalisisPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
@@ -479,27 +573,27 @@ export default function App() {
   }
 
   if (screen === 'cupones') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <CuponesPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
   if (screen === 'happyhours') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <HappyHoursPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
   if (screen === 'menueditor') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <MenuEditorPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
   if (screen === 'dashboard') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <DashboardPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
   if (screen === 'recetas') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <RecetasPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
@@ -508,13 +602,18 @@ export default function App() {
   }
 
   if (screen === 'modificadores_admin') {
-    if (!activeCajero?.es_admin) { toast.error('Acceso denegado'); volverATipo(); return null }
+    if (!activeCajero?.es_admin) return null
     return <ModificadoresAdminPage cajero={activeCajero} onVolver={volverATipo} />
+  }
+
+  if (screen === 'fiados') {
+    return <FiadosPage cajero={activeCajero} onVolver={volverATipo} />
   }
 
   // screen === 'tipo'
   return (
     <>
+      {OfflineBanner}
       {activeCajero && <DeliveryAlerts cajero={activeCajero} />}
 
       {/* ── Botón flotante "Canjear Recompensa" — siempre visible ── */}
@@ -530,7 +629,33 @@ export default function App() {
       )}
 
       {/* ── Modal de canje de recompensa ── */}
-      {showCanjeModal && <CanjeQRModal onClose={() => setShowCanjeModal(false)} />}
+      {showCanjeModal && <CanjeQRModal onClose={() => setShowCanjeModal(false)} cajeroNombre={activeCajero ? `${activeCajero.nombre} ${activeCajero.last_name}` : ''} />}
+
+      {/* ── Botón flotante "Salir del Sistema" — esquina inferior izquierda ── */}
+      {(window as any).electronAPI && (
+        <button
+          onClick={() => setShowSalirModal(true)}
+          title="Salir del sistema"
+          style={{
+            position: 'fixed', bottom: 24, left: 24, zIndex: 40,
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '8px 14px',
+            background: 'rgba(13,13,13,0.95)',
+            border: '1px solid rgba(239,68,68,0.3)',
+            color: 'rgba(239,68,68,0.6)',
+            fontWeight: 900, fontSize: 10, letterSpacing: '0.12em',
+            textTransform: 'uppercase', cursor: 'pointer', borderRadius: 0,
+            transition: 'border-color 0.15s, color 0.15s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = '#ef4444'; e.currentTarget.style.color = '#ef4444' }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(239,68,68,0.3)'; e.currentTarget.style.color = 'rgba(239,68,68,0.6)' }}
+        >
+          ⏻ Salir
+        </button>
+      )}
+
+      {/* ── Modal de salida con clave ── */}
+      {showSalirModal && <SalirSistemaModal onClose={() => setShowSalirModal(false)} />}
 
       {/* ── Modal selección de empleado ── */}
       {showModalEmpleado && (
@@ -675,6 +800,7 @@ export default function App() {
         onRecetas={irARecetas}
         onOrdenesCompra={irAOrdenesCompra}
         onModificadores={irAModificadores}
+        onFiados={irAFiados}
         darkMode={darkMode}
         onToggleDark={() => setDarkMode(d => !d)}
         connected={connected}
@@ -743,6 +869,146 @@ function LogoutConfirmModal({ cajero, stats, onConfirm, onCancel }: {
   )
 }
 
+/* ── Modal de salida del sistema con clave ── */
+function SalirSistemaModal({ onClose }: { onClose: () => void }) {
+  const [pin, setPin] = useState('')
+  const [error, setError] = useState(false)
+  const [saliendo, setSaliendo] = useState(false)
+
+  async function intentarSalir() {
+    if (saliendo) return
+    setSaliendo(true)
+    setError(false)
+    try {
+      const ok = await (window as any).electronAPI?.cerrarApp(pin)
+      if (!ok) {
+        setError(true)
+        setPin('')
+      }
+    } catch {
+      setError(true)
+      setPin('')
+    } finally {
+      setSaliendo(false)
+    }
+  }
+
+  function handleKey(e: React.KeyboardEvent) {
+    if (e.key === 'Enter') intentarSalir()
+    if (e.key === 'Escape') onClose()
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        background: 'rgba(0,0,0,0.92)',
+        backdropFilter: 'blur(8px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: 'var(--charcoal)',
+          border: '1px solid var(--border)',
+          borderTop: '3px solid #ef4444',
+          width: '100%', maxWidth: 360,
+          padding: '2rem',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.5rem',
+          boxShadow: '0 32px 80px rgba(0,0,0,0.8)',
+          animation: 'slideUp 0.18s ease',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Ícono */}
+        <div style={{
+          width: 60, height: 60, borderRadius: '50%',
+          background: 'rgba(239,68,68,0.08)',
+          border: '2px solid rgba(239,68,68,0.3)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 26,
+        }}>
+          ⏻
+        </div>
+
+        {/* Título */}
+        <div style={{ textAlign: 'center' }}>
+          <p style={{ color: '#ef4444', fontWeight: 900, fontSize: '0.85rem', letterSpacing: '0.2em', textTransform: 'uppercase', margin: 0 }}>
+            Salir del Sistema
+          </p>
+          <p style={{ color: 'var(--muted)', fontSize: '0.72rem', marginTop: 6, fontWeight: 600 }}>
+            Ingresa la clave de administrador para cerrar la aplicación
+          </p>
+        </div>
+
+        {/* Input clave */}
+        <div style={{ width: '100%' }}>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoFocus
+            value={pin}
+            onChange={e => { setPin(e.target.value); setError(false) }}
+            onKeyDown={handleKey}
+            placeholder="_ _ _ _"
+            maxLength={10}
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              background: 'var(--dark)',
+              border: `2px solid ${error ? '#ef4444' : 'var(--border)'}`,
+              color: error ? '#ef4444' : 'var(--text)',
+              fontWeight: 900, fontSize: '1.4rem',
+              letterSpacing: '0.5em', textAlign: 'center',
+              padding: '0.75rem 1rem',
+              outline: 'none', borderRadius: 0,
+              fontFamily: 'monospace',
+              transition: 'border-color 0.15s',
+            }}
+          />
+          {error && (
+            <p style={{ color: '#ef4444', fontSize: '0.7rem', fontWeight: 700, textAlign: 'center', marginTop: 6, letterSpacing: '0.05em' }}>
+              Clave incorrecta — intenta de nuevo
+            </p>
+          )}
+        </div>
+
+        {/* Botones */}
+        <div style={{ display: 'flex', gap: 10, width: '100%' }}>
+          <button
+            onClick={onClose}
+            style={{
+              flex: 1, padding: '0.75rem',
+              background: 'var(--dark)', border: '2px solid var(--border)',
+              color: 'var(--muted)', fontWeight: 900, fontSize: '0.75rem',
+              letterSpacing: '0.15em', textTransform: 'uppercase',
+              cursor: 'pointer', borderRadius: 0,
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={intentarSalir}
+            disabled={!pin || saliendo}
+            style={{
+              flex: 1, padding: '0.75rem',
+              background: !pin || saliendo ? 'rgba(239,68,68,0.15)' : '#ef4444',
+              border: '2px solid #ef4444',
+              color: !pin || saliendo ? '#ef444488' : '#fff',
+              fontWeight: 900, fontSize: '0.75rem',
+              letterSpacing: '0.15em', textTransform: 'uppercase',
+              cursor: !pin || saliendo ? 'not-allowed' : 'pointer', borderRadius: 0,
+              transition: 'background 0.15s, color 0.15s',
+            }}
+          >
+            {saliendo ? '...' : 'Confirmar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ── Aviso de inactividad ── */
 function InactividadWarning({ secondsLeft, onContinuar, onBloquear }: {
   secondsLeft: number
@@ -785,7 +1051,7 @@ function InactividadWarning({ secondsLeft, onContinuar, onBloquear }: {
 
 /* ── Pantalla tipo de orden ── */
 function TipoOrdenPage({
-  cajero, onLlevar, onComedor, onEmpleado, onCambiarCajero, onCocina, onReportes, onCorte, onHistorial, onInventario, onReservaciones, onTurnos, onConfiguracion, onAnalisis, onGastos, onAdelantos, onCupones, onHappyHours, onMenuEditor, onDashboard, onRecetas, onOrdenesCompra, onModificadores, darkMode, onToggleDark, connected,
+  cajero, onLlevar, onComedor, onEmpleado, onCambiarCajero, onCocina, onReportes, onCorte, onHistorial, onInventario, onReservaciones, onTurnos, onConfiguracion, onAnalisis, onGastos, onAdelantos, onCupones, onHappyHours, onMenuEditor, onDashboard, onRecetas, onOrdenesCompra, onModificadores, onFiados, darkMode, onToggleDark, connected,
 }: {
   cajero: CajeroActivo
   onLlevar: () => void
@@ -810,6 +1076,7 @@ function TipoOrdenPage({
   onRecetas: () => void
   onOrdenesCompra: () => void
   onModificadores: () => void
+  onFiados: () => void
   darkMode: boolean
   onToggleDark: () => void
   connected?: boolean
@@ -982,6 +1249,7 @@ function TipoOrdenPage({
     { icon: '📅', label: 'Reservaciones', action: onReservaciones, color: '#06b6d4' },
     { icon: '💵', label: 'Adelantos',     action: onAdelantos,    color: '#22c55e' },
     { icon: '💰', label: 'Ventas',        action: verVentas,      color: '#22c55e' },
+    { icon: '📒', label: 'Fiados',        action: onFiados,       color: '#ef4444' },
   ]
 
   const ADMIN_GROUPS = [
@@ -1003,6 +1271,7 @@ function TipoOrdenPage({
       items: [
         { icon: '💸', label: 'Gastos',     action: onGastos,      color: '#ef4444' },
         { icon: '💵', label: 'Adelantos',  action: onAdelantos,   color: '#22c55e' },
+        { icon: '📒', label: 'Fiados',     action: onFiados,      color: '#ef4444' },
         { icon: '🛒', label: 'Órd. Compra', action: onOrdenesCompra, color: '#f97316' },
         { icon: '🎟', label: 'Cupones',    action: onCupones,     color: '#a855f7' },
         { icon: '⚡', label: 'Happy Hrs',  action: onHappyHours,  color: '#F0A800' },

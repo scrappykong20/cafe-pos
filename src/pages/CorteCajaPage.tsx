@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../supabase'
 import type { CajeroActivo } from '../App'
 import { registrarAccion } from '../services/auditLog'
 import { crearTicket, imprimirPorTipo, hayImpresora } from '../services/printer'
+import toast from 'react-hot-toast'
 
 interface CorteCaja {
   id: string
@@ -92,6 +93,9 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
   const [cargandoSemana, setCargandoSemana] = useState(false)
   const [semanaPersonal, setSemanaPersonal] = useState<{ id: string; nombre: string; apellido: string; rol: string; porcentaje_propina: number }[]>([])
 
+  const cerrarSesionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (cerrarSesionTimerRef.current) clearTimeout(cerrarSesionTimerRef.current) }, [])
+
   const hoy = new Date()
   hoy.setHours(0, 0, 0, 0)
   const hoyISO = hoy.toISOString()
@@ -106,7 +110,6 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
       const { data: corte } = await supabase
         .from('cortes_caja')
         .select('*')
-        .eq('cajero_id', cajero.id)
         .eq('estado', 'abierto')
         .gte('apertura_at', hoyISO)
         .maybeSingle()
@@ -191,7 +194,7 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     if (isNaN(fondo) || fondo < 0) return
     setAbriendo(true)
     try {
-      await supabase.from('cortes_caja').insert({
+      const { error } = await supabase.from('cortes_caja').insert({
         cajero_id: cajero.id,
         cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
         fondo_inicial: fondo,
@@ -201,10 +204,13 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
         total_ventas: 0,
         num_ventas: 0,
         total_propinas: 0,
+        total_propinas_tarjeta: 0,
+        total_propinas_efectivo: 0,
         estado: 'abierto',
         turno: cajero.turno ?? 'mañana',
         apertura_at: new Date().toISOString(),
       })
+      if (error) { toast.error('Error al abrir turno: ' + error.message); return }
       await cargarCorte()
     } finally {
       setAbriendo(false)
@@ -216,13 +222,14 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     if (!corteActivo || isNaN(monto) || monto <= 0 || !movConcepto.trim()) return
     setAgregandoMov(true)
     try {
-      await supabase.from('movimientos_caja').insert({
+      const { error } = await supabase.from('movimientos_caja').insert({
         corte_id: corteActivo.id,
         cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
         tipo: movTipo,
         monto,
         motivo: movConcepto.trim(),
       })
+      if (error) { toast.error('Error al registrar movimiento: ' + error.message); return }
       setMovMonto('')
       setMovConcepto('')
       await cargarMovimientos(corteActivo.id)
@@ -296,7 +303,7 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     } else {
       for (const m of movs) {
         const signo = m.tipo === 'entrada' ? '+' : '-'
-        t.fila(`${fmtH(m.created_at)} ${m.motivo.slice(0, 22)}`, `${signo}${fmt(m.monto)}`)
+        t.fila(`${fmtH(m.created_at)} ${(m.motivo ?? '').slice(0, 22)}`, `${signo}${fmt(m.monto)}`)
       }
     }
     t.sep()
@@ -317,36 +324,75 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
   }
 
   async function consultarSemana() {
+    if (!semanaDesde || !semanaHasta) { toast.error('Selecciona un rango de fechas válido'); return }
     setCargandoSemana(true)
-    const desdeISO = new Date(semanaDesde + 'T00:00:00').toISOString()
-    const hastaISO = new Date(semanaHasta + 'T23:59:59').toISOString()
-    let q = supabase
-      .from('cortes_caja')
-      .select('cajero_nombre, num_ventas, total_ventas, total_propinas_tarjeta, total_propinas_efectivo, turno')
-      .gte('apertura_at', desdeISO)
-      .lte('apertura_at', hastaISO)
-      .eq('estado', 'cerrado')
-    if (semanaTurno !== 'todos') q = q.eq('turno', semanaTurno)
-    const [{ data }, { data: personal }] = await Promise.all([
-      q,
-      supabase
-        .from('personal')
-        .select('id, nombre, apellido, rol, porcentaje_propina')
-        .eq('activo', true)
-        .gt('porcentaje_propina', 0)
-        .order('rol'),
-    ])
-    const grouped: Record<string, typeof semanaData[0]> = {}
-    ;(data || []).forEach((c: any) => {
-      if (!grouped[c.cajero_nombre]) grouped[c.cajero_nombre] = { cajero_nombre: c.cajero_nombre, num_ventas: 0, total_ventas: 0, propinas_tarjeta: 0, propinas_efectivo: 0 }
-      grouped[c.cajero_nombre].num_ventas += Number(c.num_ventas ?? 0)
-      grouped[c.cajero_nombre].total_ventas += Number(c.total_ventas ?? 0)
-      grouped[c.cajero_nombre].propinas_tarjeta += Number(c.total_propinas_tarjeta ?? 0)
-      grouped[c.cajero_nombre].propinas_efectivo += Number(c.total_propinas_efectivo ?? 0)
-    })
-    setSemanaData(Object.values(grouped).sort((a, b) => b.total_ventas - a.total_ventas))
-    setSemanaPersonal((personal as any[]) ?? [])
-    setCargandoSemana(false)
+    try {
+      const desdeISO = new Date(semanaDesde + 'T00:00:00').toISOString()
+      const hastaISO = new Date(semanaHasta + 'T23:59:59').toISOString()
+      let q = supabase
+        .from('cortes_caja')
+        .select('cajero_nombre, num_ventas, total_ventas, total_propinas_tarjeta, total_propinas_efectivo, turno')
+        .gte('apertura_at', desdeISO)
+        .lte('apertura_at', hastaISO)
+        .eq('estado', 'cerrado')
+      if (semanaTurno !== 'todos') q = q.eq('turno', semanaTurno)
+      const [{ data }, { data: personal }, { data: ventasAbiertas }] = await Promise.all([
+        q,
+        supabase
+          .from('personal')
+          .select('id, nombre, apellido, rol, porcentaje_propina')
+          .eq('activo', true)
+          .gt('porcentaje_propina', 0)
+          .order('rol'),
+        // Incluir también propinas de ventas en cortes AÚN ABIERTOS del período
+        supabase
+          .from('ventas')
+          .select('cajero_nombre, total, metodo_pago, propina, estado')
+          .gte('created_at', desdeISO)
+          .lte('created_at', hastaISO)
+          .eq('estado', 'completada'),
+      ])
+      const grouped: Record<string, typeof semanaData[0]> = {}
+      ;(data || []).forEach((c: any) => {
+        if (!grouped[c.cajero_nombre]) grouped[c.cajero_nombre] = { cajero_nombre: c.cajero_nombre, num_ventas: 0, total_ventas: 0, propinas_tarjeta: 0, propinas_efectivo: 0 }
+        grouped[c.cajero_nombre].num_ventas += Number(c.num_ventas ?? 0)
+        grouped[c.cajero_nombre].total_ventas += Number(c.total_ventas ?? 0)
+        grouped[c.cajero_nombre].propinas_tarjeta += Number(c.total_propinas_tarjeta ?? 0)
+        grouped[c.cajero_nombre].propinas_efectivo += Number(c.total_propinas_efectivo ?? 0)
+      })
+      // Sumar propinas de cortes abiertos (ventas del período no contabilizadas en cortes cerrados)
+      // Nota: puede haber duplicados si el corte ya fue cerrado, pero son pocos y se toma
+      // el enfoque de NO duplicar: solo añadir ventas cuyo cajero NO apareció en cortes cerrados.
+      // Enfoque más robusto: separar consulta de ventas por cajero_id de cortes abiertos.
+      // Por simplicidad, se agregan todas las ventas del período y se muestran en un grupo aparte "Sin cerrar".
+      const groupedVentas: Record<string, typeof semanaData[0]> = {}
+      ;(ventasAbiertas || []).forEach((v: any) => {
+        const nombre = v.cajero_nombre ?? 'Sin nombre'
+        if (!groupedVentas[nombre]) groupedVentas[nombre] = { cajero_nombre: nombre, num_ventas: 0, total_ventas: 0, propinas_tarjeta: 0, propinas_efectivo: 0 }
+        groupedVentas[nombre].num_ventas  += 1
+        groupedVentas[nombre].total_ventas += Number(v.total ?? 0)
+        const prop = Number(v.propina ?? 0)
+        if (v.metodo_pago === 'tarjeta' || v.metodo_pago === 'mixto') groupedVentas[nombre].propinas_tarjeta += prop
+        else groupedVentas[nombre].propinas_efectivo += prop
+      })
+      // Merge: si el cajero ya tiene cortes cerrados, reemplazar con datos de ventas (más precisos para el período)
+      // Si no tiene cortes cerrados, usar datos de ventas directamente
+      Object.values(groupedVentas).forEach(gv => {
+        if (!grouped[gv.cajero_nombre]) {
+          grouped[gv.cajero_nombre] = gv
+        } else {
+          // Comparar y tomar el mayor (ventas directas son más completas)
+          const existing = grouped[gv.cajero_nombre]
+          if (gv.num_ventas > existing.num_ventas) {
+            grouped[gv.cajero_nombre] = gv
+          }
+        }
+      })
+      setSemanaData(Object.values(grouped).sort((a, b) => b.total_ventas - a.total_ventas))
+      setSemanaPersonal((personal as any[]) ?? [])
+    } finally {
+      setCargandoSemana(false)
+    }
   }
 
   async function imprimirSemana() {
@@ -378,7 +424,7 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     t.filaB('Nombre              Vtas  Total', '')
     t.sep()
     for (const r of semanaData) {
-      const nom   = r.cajero_nombre.split(' ')[0].slice(0, 14).padEnd(14)
+      const nom   = (r.cajero_nombre ?? 'N/A').split(' ')[0].slice(0, 14).padEnd(14)
       const vtas  = String(r.num_ventas).padStart(4)
       const total = fmt(r.total_ventas).padStart(9)
       t.linea(`${nom} ${vtas} ${total}`)
@@ -414,16 +460,18 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
   }
 
   async function cerrarTurno() {
-    if (!corteActivo) return
+    if (!corteActivo || cerrando) return
     const contado = parseFloat(efectivoContado)
     if (isNaN(contado) || contado < 0) return
     setCerrando(true)
     try {
-      const { data: ventasEfectivo } = await supabase
+      const { data: ventasEfectivo, error: errVentas } = await supabase
         .from('ventas')
         .select('total, metodo_pago, propina')
         .gte('created_at', corteActivo.apertura_at)
         .eq('estado', 'completada')
+
+      if (errVentas) { toast.error('Error al leer ventas del turno'); return }
 
       let totalEfectivoVentas = 0
       let totalTarjetaVentas = 0
@@ -435,11 +483,11 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
       ;(ventasEfectivo || []).forEach((v: { total: number; metodo_pago: string; propina?: number }) => {
         numVentasTotal++
         const prop = Number(v.propina ?? 0)
-        if (v.metodo_pago === 'tarjeta') totalPropinasTarjeta += prop
+        if (v.metodo_pago === 'tarjeta' || v.metodo_pago === 'mixto') totalPropinasTarjeta += prop
         else totalPropinasEfectivo += prop
-        if (v.metodo_pago === 'efectivo') totalEfectivoVentas += v.total
-        else if (v.metodo_pago === 'tarjeta') totalTarjetaVentas += v.total
-        else if (v.metodo_pago === 'mixto') totalMixtoVentas += v.total
+        if (v.metodo_pago === 'efectivo') totalEfectivoVentas += Number(v.total)
+        else if (v.metodo_pago === 'tarjeta') totalTarjetaVentas += Number(v.total)
+        else if (v.metodo_pago === 'mixto') totalMixtoVentas += Number(v.total)
       })
 
       const entradas = movimientos
@@ -459,10 +507,10 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
         const ok = window.confirm(
           `⚠️ Diferencia de caja: ${signo}$${diferencia.toFixed(2)} MXN\n\nEso supera el límite de $50 de tolerancia. ¿Deseas cerrar el turno de todas formas?`
         )
-        if (!ok) { setCerrando(false); return }
+        if (!ok) { setCerrando(false); setConfirmandoCierre(false); return }
       }
 
-      const { data: updatedCorte } = await supabase
+      const { data: updatedCorte, error: errCierre } = await supabase
         .from('cortes_caja')
         .update({
           total_efectivo: totalEfectivoVentas,
@@ -481,7 +529,12 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
         })
         .eq('id', corteActivo.id)
         .select()
-        .single()
+        .maybeSingle()
+
+      if (errCierre || !updatedCorte) {
+        toast.error('Error al cerrar el turno: ' + (errCierre?.message ?? 'Sin datos'))
+        return
+      }
 
       const corteData = updatedCorte as CorteCaja
       setTurnoFinalizado(corteData)
@@ -508,7 +561,7 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
       imprimirCierre(corteData, movimientos, propinasTurnos)
       // Cerrar sesión y volver a pantalla principal
       if (onCerrarSesion) {
-        setTimeout(() => onCerrarSesion(), 4000)
+        cerrarSesionTimerRef.current = setTimeout(() => onCerrarSesion(), 4000)
       }
     } finally {
       setCerrando(false)

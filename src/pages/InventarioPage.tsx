@@ -226,12 +226,13 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
       if (cajero.es_admin) {
         const menuIdsWithInv = new Set(mapped.filter(i => i.menu_id).map(i => i.menu_id as string))
 
-        const { data: menuData } = await supabase
+        const { data: menuData, error: menuError } = await supabase
           .from('menu')
           .select('id, nombre, emoji, precio, categoria, disponible')
           .order('categoria')
           .order('nombre')
 
+        if (menuError) { toast.error('Error al cargar menú'); return }
         const sinInv = (menuData ?? []).filter((m: MenuRow) => !menuIdsWithInv.has(m.id))
         setMenuSinInv(sinInv)
       } else {
@@ -254,6 +255,7 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
       .channel('inventario-realtime-v2')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'inventario' }, () => {
         cargarDatos()
+        setHistorialLoaded(false)
       })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
@@ -331,7 +333,7 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
       }
     }
 
-    setAjustando(null)
+    setAjustando(prev => prev === item.id ? null : prev)
   }
 
   // ── Modal: Recibir Mercancía ─────────────────────────────────────────────────
@@ -368,7 +370,8 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
       return
     }
 
-    const nuevoStock = item.stock_actual + cantidad
+    // Use stockActual from modal snapshot (not from live state, which may have changed)
+    const nuevoStock = modal.stockActual + cantidad
 
     const { error } = await supabase
       .from('inventario')
@@ -457,19 +460,24 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
     }
     if (modal.itemId) payload.id = modal.itemId
 
-    const { error } = await supabase
-      .from('inventario')
-      .upsert(payload)
+    try {
+      const { error } = await supabase
+        .from('inventario')
+        .upsert(payload)
 
-    if (error) {
-      toast.error('Error guardando configuración')
+      if (error) {
+        toast.error('Error guardando configuración')
+        return
+      }
+
+      toast.success('✓ Configuración guardada')
+      setModal(null)
+      cargarDatos()
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
       setModal(m => m && m.kind === 'configurar' ? { ...m, saving: false } : m)
-      return
     }
-
-    toast.success('✓ Configuración guardada')
-    setModal(null)
-    cargarDatos()
   }
 
   // ── Modal: Nuevo Item ────────────────────────────────────────────────────────
@@ -507,28 +515,33 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
 
     setModal(m => m && m.kind === 'nuevo' ? { ...m, saving: true } : m)
 
-    const { error } = await supabase
-      .from('inventario')
-      .insert({
-        menu_id:      null,
-        nombre:       modal.nombre.trim(),
-        emoji:        modal.emoji.trim() || '📦',
-        categoria:    modal.categoria,
-        unidad:       modal.unidad,
-        stock_actual: stockActual,
-        stock_minimo: stockMinimo,
-        stock_maximo: stockMaximo,
-      })
+    try {
+      const { error } = await supabase
+        .from('inventario')
+        .insert({
+          menu_id:      null,
+          nombre:       modal.nombre.trim(),
+          emoji:        modal.emoji.trim() || '📦',
+          categoria:    modal.categoria,
+          unidad:       modal.unidad,
+          stock_actual: stockActual,
+          stock_minimo: stockMinimo,
+          stock_maximo: stockMaximo,
+        })
 
-    if (error) {
-      toast.error('Error creando ítem')
+      if (error) {
+        toast.error('Error creando ítem')
+        return
+      }
+
+      toast.success(`✓ Ítem "${modal.nombre}" creado`)
+      setModal(null)
+      cargarDatos()
+    } catch {
+      toast.error('Error de conexión. Intenta de nuevo.')
+    } finally {
       setModal(m => m && m.kind === 'nuevo' ? { ...m, saving: false } : m)
-      return
     }
-
-    toast.success(`✓ Ítem "${modal.nombre}" creado`)
-    setModal(null)
-    cargarDatos()
   }
 
   // ── Derived data ─────────────────────────────────────────────────────────────

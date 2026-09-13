@@ -96,6 +96,9 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   const [supergrupo, setSupergrupo] = useState<string | null>(null)
   const [busqueda, setBusqueda] = useState('')
   const [cart, setCart] = useState<CartItem[]>([])
+  // snapshotCocina: cantidad de cada item YA enviada a cocina (menu_id → cantidad)
+  // Se actualiza al cargar la orden y cada vez que se manda a cocina
+  const [snapshotCocina, setSnapshotCocina] = useState<Map<string, number>>(new Map())
   const [ordenId, setOrdenId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -108,6 +111,10 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   const [tiempoOrden, setTiempoOrden] = useState<number>(0)
   const ordenIniciadaEn = useRef<number>(Date.now())
   const broadcastRef = useRef<BroadcastChannel | null>(null)
+  const creandoOrdenRef = useRef(false)
+  const agregandoRef = useRef(false)
+  const addedTimersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const audioCtxRef = useRef<AudioContext | null>(null)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; producto: MenuItem } | null>(null)
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [notaOrden, setNotaOrden] = useState('')
@@ -142,6 +149,12 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   })
   // Acceso rápido — top 6 productos más vendidos
   const [favoritos, setFavoritos] = useState<MenuItem[]>([])
+  // ── Delivery modal ────────────────────────────────────────────────────────
+  const [showDeliveryModal, setShowDeliveryModal] = useState(false)
+  const [deliveryForm, setDeliveryForm] = useState({ nombre: '', telefono: '', direccion: '' })
+  const [enviandoDelivery, setEnviandoDelivery] = useState(false)
+  // BUG 17 — guard para evitar doble envío a cocina
+  const [mandando, setMandando] = useState(false)
   // Cuando termina la carga inicial y hay artículos → cambiar a resumen automáticamente
   useEffect(() => {
     if (!loading && cart.length > 0) {
@@ -157,6 +170,11 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     return () => { broadcastRef.current?.close() }
   }, [])
 
+  // BUG 20 — Limpiar timers de addedItems al desmontar
+  useEffect(() => {
+    return () => { addedTimersRef.current.forEach(clearTimeout) }
+  }, [])
+
   // Broadcast cuando cambia el carrito
   useEffect(() => {
     broadcastRef.current?.postMessage({
@@ -167,11 +185,17 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     })
   }, [cart, currentMesaNombre])
 
-  // A1 — Guardar carrito en localStorage cuando cambia
+  // A1 — Guardar carrito en localStorage cuando cambia (BUG 2: maneja QuotaExceededError)
   useEffect(() => {
     if (!localStorageCartKey || loading) return
     if (cart.length > 0) {
-      try { localStorage.setItem(localStorageCartKey, JSON.stringify(cart)) } catch {}
+      try {
+        localStorage.setItem(localStorageCartKey, JSON.stringify(cart))
+      } catch (e) {
+        if (e instanceof DOMException && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
+          console.warn('[POS] localStorage lleno - carrito no persistido')
+        }
+      }
     } else {
       try { localStorage.removeItem(localStorageCartKey) } catch {}
     }
@@ -180,7 +204,7 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   const subtotal = cart.reduce((s, i) => s + (i.precio ?? 0) * i.cantidad, 0)
   const descuentoMonto = descuento
     ? descuento.tipo === 'porcentaje'
-      ? Math.round(subtotal * descuento.valor) / 100
+      ? parseFloat((subtotal * descuento.valor / 100).toFixed(2))
       : Math.min(descuento.valor, subtotal)
     : 0
   const total = subtotal - descuentoMonto
@@ -205,14 +229,17 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     return base.filter(p => p.categoria === catActiva)
   })()
 
-  // Mejora 2 — Disponibilidad por horario
+  // Mejora 2 — Disponibilidad por horario (BUG 1: ahora convierte a minutos y maneja medianoche)
   function productoDisponibleAhora(producto: MenuItem): boolean {
-    if (!producto.hora_inicio && !producto.hora_fin) return true
+    if (!producto.hora_inicio || !producto.hora_fin) return true
     const ahora = new Date()
-    const hhmm = ahora.toTimeString().slice(0, 5) // "HH:MM"
-    const inicio = producto.hora_inicio?.slice(0, 5) ?? '00:00'
-    const fin = producto.hora_fin?.slice(0, 5) ?? '23:59'
-    return hhmm >= inicio && hhmm <= fin
+    const horaAhora = ahora.getHours() * 60 + ahora.getMinutes()
+    const [h1, m1] = producto.hora_inicio.split(':').map(Number)
+    const [h2, m2] = producto.hora_fin.split(':').map(Number)
+    const inicio = h1 * 60 + m1
+    const fin = h2 * 60 + m2
+    if (inicio > fin) return horaAhora >= inicio || horaAhora <= fin
+    return horaAhora >= inicio && horaAhora <= fin
   }
 
   function formatHorario(producto: MenuItem): string {
@@ -226,7 +253,30 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     return `${fmt(producto.hora_inicio)}-${fmt(producto.hora_fin)}`
   }
 
+  const MENU_CACHE_KEY = 'pos_menu_cache'
+
   const cargarDatos = useCallback(async () => {
+    // Si estamos offline, cargar desde caché local
+    if (!navigator.onLine) {
+      try {
+        const cached = localStorage.getItem(MENU_CACHE_KEY)
+        if (cached) {
+          const todosMenu = JSON.parse(cached) as MenuItem[]
+          setMenu(todosMenu)
+          const disponibles = todosMenu.filter(p => p.disponible !== false)
+          const unicos = [...new Set(disponibles.map(p => p.categoria).filter(Boolean))]
+          setCategorias([CAT_TODAS, ...unicos.map(id => ({
+            id,
+            nombre: LEGACY[id]?.nombre ?? id,
+            emoji: LEGACY[id]?.emoji ?? '🍽️',
+          }))])
+          return
+        }
+      } catch {}
+      setError('Sin conexión y sin caché de menú disponible')
+      return
+    }
+
     try {
       let { data: menuData, error: menuErr } = await supabase
         .from('menu')
@@ -245,6 +295,8 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
 
       // B1 — cargar TODOS los productos (incluyendo agotados) para mostrar overlay
       const todosMenu = (menuData || []) as MenuItem[]
+      // Guardar en caché para uso offline
+      try { localStorage.setItem(MENU_CACHE_KEY, JSON.stringify(todosMenu)) } catch {}
       setMenu(todosMenu)
 
       const disponibles = todosMenu.filter(p => p.disponible !== false)
@@ -283,6 +335,11 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
             notas: i.notas ?? undefined,
           }))
           setCart(items)
+          // Solo marcar items como "ya en cocina" si la orden fue realmente enviada (estado 'abierta')
+          // Si estado es 'en_caja', la orden existe pero nunca se mandó → snapshot vacío
+          if (ordenData.estado === 'abierta') {
+            setSnapshotCocina(new Map(items.map(i => [i.menu_id, i.cantidad])))
+          }
           // Ir directo a resumen si ya hay artículos en la orden
           if (items.length > 0) setVistaOrden('resumen')
           // A1 — limpiar localStorage si ya tenemos datos de BD
@@ -331,16 +388,18 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     return () => clearInterval(iv)
   }, [ordenId])
 
-  // Acceso rápido — cargar top 6 favoritos desde venta_items
+  // Acceso rápido — cargar top 6 favoritos desde venta_items (BUG 8: filtra por último mes)
   useEffect(() => {
     if (menu.length === 0) return
     let cancelled = false
     async function cargarFavoritos() {
+      const hace30dias = new Date()
+      hace30dias.setDate(hace30dias.getDate() - 30)
       const { data, error: favErr } = await supabase
         .from('venta_items')
-        .select('menu_id, nombre, emoji, precio, cantidad')
-        .order('created_at', { ascending: false })
-        .limit(500)
+        .select('menu_id, cantidad')
+        .gte('created_at', hace30dias.toISOString())
+        .limit(1000)
       if (favErr || !data || cancelled) return
 
       // Agregar totales por menu_id
@@ -385,10 +444,13 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     if (longPressRef.current) clearTimeout(longPressRef.current)
   }
 
-  // Sound + haptic on add
+  // Sound + haptic on add — reutiliza un único AudioContext para evitar límite del navegador
   function playAddSound() {
     try {
-      const ctx = new AudioContext()
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        audioCtxRef.current = new AudioContext()
+      }
+      const ctx = audioCtxRef.current
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
       osc.connect(gain)
@@ -423,11 +485,12 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     if (!productoDisponibleAhora(producto)) return
 
     // Verificar si tiene modificadores
-    const { data: links } = await supabase
+    const { data: links, error: linksErr } = await supabase
       .from('menu_modificadores')
       .select('grupo_id')
       .eq('menu_id', producto.id)
       .limit(1)
+    if (linksErr) { console.error('Error al cargar modificadores:', linksErr.message) }
 
     if (links && links.length > 0) {
       setProductoSeleccionado(producto)
@@ -437,12 +500,17 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   }
 
   async function agregarProducto(producto: MenuItem, precio: number, notas: string | null, cantidad: number) {
+    // BUG 16 — evitar doble envío concurrente
+    if (agregandoRef.current) return
+    agregandoRef.current = true
+    try {
     playAddSound()
     // C3 — animación pulse al agregar
     setAddedItems(prev => new Set([...prev, producto.id]))
-    setTimeout(() => {
+    const t = setTimeout(() => {
       setAddedItems(prev => { const n = new Set(prev); n.delete(producto.id); return n })
     }, 400)
+    addedTimersRef.current.push(t)
     // Volver a resumen después de agregar para que el usuario vea el carrito actualizado
     setVistaOrden('resumen')
 
@@ -465,6 +533,9 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
 
     let curOrdenId = ordenId
     if (!curOrdenId) {
+      // Evitar crear orden duplicada si se toca dos veces seguido antes de que termine la primera llamada
+      if (creandoOrdenRef.current) return
+      creandoOrdenRef.current = true
       // Calcular número diario
       const hoyInicio = new Date(); hoyInicio.setHours(0,0,0,0)
       const { count: ordenCount } = await supabase.from('ordenes').select('*', { count: 'exact', head: true }).gte('created_at', hoyInicio.toISOString())
@@ -481,25 +552,40 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
         tipo: tipo === 'empleado' ? 'comedor' : tipo,
         num_personas: tipo === 'comedor' ? numPersonas : 1,
         numero_diario: numeroDiario,
-      }).select().single()
+      }).select().maybeSingle()
 
       if (err || !nueva) {
+        // Sin conexión: mantener el item en carrito en modo offline
+        if (!navigator.onLine || err?.message?.includes('fetch')) {
+          toast('Sin conexión — ítem agregado localmente', { icon: '📶', duration: 3000 })
+          creandoOrdenRef.current = false
+          return  // El item ya está en cart; checkout lo sincronizará
+        }
         toast.error(`Error al crear la orden: ${err?.message || 'sin datos'}`)
         setCart(prev => prev.filter(i => i.menu_id !== cartKey))
+        creandoOrdenRef.current = false
         return
       }
       curOrdenId = nueva.id
       setOrdenId(nueva.id)
+      creandoOrdenRef.current = false
       if (currentMesaId) await supabase.from('mesas').update({ estado: 'ocupada', orden_id: nueva.id }).eq('id', currentMesaId)
     }
 
-    // Siempre insertar un nuevo ítem (no acumular, para respetar distintos modificadores)
-    const { data: itemEx } = await supabase.from('orden_items').select('id, cantidad')
+    // Acumular cantidad si el ítem ya existe sin modificadores
+    if (!curOrdenId) return  // offline: sin orden en BD, el carrito ya tiene el item
+    let itemExQuery = supabase.from('orden_items').select('id, cantidad')
       .eq('orden_id', curOrdenId).eq('menu_id', producto.id)
-      .eq('notas', notas ?? '')
-      .maybeSingle()
+    // notas NULL debe buscarse con .is('notas', null), no .eq('notas', '')
+    if (notas) {
+      itemExQuery = itemExQuery.eq('notas', notas)
+    } else {
+      itemExQuery = itemExQuery.is('notas', null)
+    }
+    const { data: itemEx } = await itemExQuery.maybeSingle()
 
-    if (itemEx && !notas) {
+    if (itemEx) {
+      // Si ya existe (con o sin notas), acumular cantidad
       await supabase.from('orden_items').update({ cantidad: itemEx.cantidad + cantidad }).eq('id', itemEx.id)
     } else {
       await supabase.from('orden_items').insert({
@@ -507,6 +593,10 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
         nombre: producto.nombre, emoji: producto.emoji,
         precio: precio ?? 0, cantidad, notas: notas ?? null,
       })
+    }
+    } finally {
+      // BUG 16 — liberar guard de doble envío
+      agregandoRef.current = false
     }
   }
 
@@ -554,14 +644,27 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     if (nueva <= 0) { eliminarItem(menuId); return }
     setCart(prev => prev.map(i => i.menu_id === menuId ? { ...i, cantidad: nueva } : i))
     if (ordenId) {
-      const { data: bd } = await supabase.from('orden_items').select('id').eq('orden_id', ordenId).eq('menu_id', menuId).maybeSingle()
+      // menu_id en cart puede ser "uuid__notas" — usar el ID real para la query
+      const realMenuId = item.producto_id ?? menuId.split('__')[0]
+      let q = supabase.from('orden_items').select('id').eq('orden_id', ordenId).eq('menu_id', realMenuId)
+      if (item.notas) q = q.eq('notas', item.notas)
+      else q = q.is('notas', null)
+      const { data: bd } = await q.maybeSingle()
       if (bd) await supabase.from('orden_items').update({ cantidad: nueva }).eq('id', bd.id)
     }
   }
 
   async function eliminarItem(menuId: string) {
+    const item = cart.find(i => i.menu_id === menuId)
     setCart(prev => prev.filter(i => i.menu_id !== menuId))
-    if (ordenId) await supabase.from('orden_items').delete().eq('orden_id', ordenId).eq('menu_id', menuId)
+    if (ordenId && item) {
+      // menu_id en cart puede ser "uuid__notas" — usar el ID real para la query
+      const realMenuId = item.producto_id ?? menuId.split('__')[0]
+      let q = supabase.from('orden_items').delete().eq('orden_id', ordenId).eq('menu_id', realMenuId)
+      if (item.notas) q = q.eq('notas', item.notas)
+      else q = q.is('notas', null)
+      await q
+    }
   }
 
   // Si el carrito está vacío y hay una orden abierta sin productos, la cancela y libera la mesa
@@ -597,12 +700,31 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   }
 
   async function mandarACocina() {
+    // BUG 17 — evitar doble envío concurrente
+    if (mandando) return
+    setMandando(true)
+    try {
     if (cart.length === 0) { toast.error('Agrega productos primero'); return }
     if (!ordenId) { toast.error('No hay orden activa'); return }
+
+    // Calcular solo los items NUEVOS o con cantidad aumentada desde el último envío
+    const itemsNuevos = cart
+      .map(item => {
+        const cantidadYaEnviada = snapshotCocina.get(item.menu_id) ?? 0
+        const cantidadNueva = item.cantidad - cantidadYaEnviada
+        return cantidadNueva > 0 ? { ...item, cantidad: cantidadNueva } : null
+      })
+      .filter(Boolean) as CartItem[]
+
+    if (itemsNuevos.length === 0) {
+      toast.error('No hay productos nuevos para mandar a cocina')
+      return
+    }
+
     const { error } = await supabase.from('ordenes').update({ estado: 'abierta' }).eq('id', ordenId)
     if (error) { toast.error('Error al mandar a cocina'); return }
 
-    // Imprimir comanda en impresora de cocina
+    // Imprimir comanda solo con los items NUEVOS
     if (hayImpresora('cocina')) {
       const hora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
       const html = buildComandaHTML({
@@ -611,15 +733,49 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
         cajeroNombre: cajero.nombre,
         tipo: tipo === 'llevar' ? 'llevar' : 'comedor',
         hora,
-        items: cart.map(i => ({ emoji: i.emoji, nombre: i.nombre, cantidad: i.cantidad, notas: i.notas })),
+        items: itemsNuevos.map(i => ({ emoji: i.emoji, nombre: i.nombre, cantidad: i.cantidad, notas: i.notas })),
         notaOrden: notaOrden || undefined,
         esConsumoEmpleado: tipo === 'empleado',
       })
       void imprimirPorTipo('cocina', html)
     }
 
+    // Actualizar snapshot: ahora todo el carrito actual está en cocina
+    setSnapshotCocina(new Map(cart.map(i => [i.menu_id, i.cantidad])))
+
     toast.success('🍳 ¡Orden mandada a cocina!')
     onVolver()
+    } finally {
+      // BUG 17 — liberar guard de doble envío
+      setMandando(false)
+    }
+  }
+
+  async function confirmarDelivery() {
+    // BUG 18 — evitar doble envío concurrente
+    if (enviandoDelivery) return
+    if (!deliveryForm.nombre.trim()) { toast.error('Ingresa el nombre del cliente'); return }
+    if (!deliveryForm.direccion.trim()) { toast.error('Ingresa la dirección de entrega'); return }
+    if (!ordenId) { toast.error('Primero agrega productos a la orden'); return }
+    setEnviandoDelivery(true)
+    try {
+      const { error } = await supabase.from('ordenes').update({
+        canal: 'delivery',
+        tipo_entrega: 'domicilio',
+        cliente_nombre: deliveryForm.nombre.trim(),
+        cliente_telefono: deliveryForm.telefono.trim() || null,
+        direccion_entrega: deliveryForm.direccion.trim(),
+        estado_entrega: 'listo',
+      }).eq('id', ordenId)
+      if (error) throw error
+      toast.success('🛵 Pedido enviado al repartidor')
+      setShowDeliveryModal(false)
+      setDeliveryForm({ nombre: '', telefono: '', direccion: '' })
+    } catch (err: any) {
+      toast.error(err.message || 'Error al enviar')
+    } finally {
+      setEnviandoDelivery(false)
+    }
   }
 
   function onVentaCompletada() {
@@ -670,6 +826,8 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
             <div className="flex items-center flex-1 min-w-0">
               <input
                 type="text"
+                inputMode="search"
+                enterKeyHint="search"
                 value={busqueda}
                 onChange={e => setBusqueda(e.target.value)}
                 placeholder="Buscar producto..."
@@ -788,6 +946,7 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
           onHistorial={mesaId ? cargarHistorial : undefined}
           onNumPersonas={setNumPersonas}
           onNotaOrden={setNotaOrden}
+          onDelivery={tipo === 'llevar' ? () => setShowDeliveryModal(true) : undefined}
         />
       )}
 
@@ -1366,6 +1525,59 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
         />
       )}
 
+      {/* ── Modal: Enviar a Repartidor ──────────────────────────────────── */}
+      {showDeliveryModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 950,
+          background: 'rgba(0,0,0,0.92)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16,
+        }}>
+          <div style={{
+            background: 'var(--charcoal)', border: '1px solid var(--border)',
+            borderTop: '4px solid #ef4444', width: '100%', maxWidth: 420,
+          }}>
+            <div style={{ padding: '14px 18px', background: 'var(--dark)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <p style={{ color: '#ef4444', fontWeight: 900, fontSize: 15, textTransform: 'uppercase', letterSpacing: 1, margin: 0 }}>
+                🛵 Datos de entrega
+              </p>
+              <button onClick={() => setShowDeliveryModal(false)} style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: 22, cursor: 'pointer' }}>✕</button>
+            </div>
+            <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {[
+                { label: 'Nombre del cliente *', key: 'nombre', placeholder: 'Ej: Juan García', type: 'text' },
+                { label: 'Teléfono', key: 'telefono', placeholder: '961 123 4567', type: 'tel' },
+                { label: 'Dirección de entrega *', key: 'direccion', placeholder: 'Calle, número, colonia...', type: 'text' },
+              ].map(f => (
+                <div key={f.key}>
+                  <label style={{ color: 'var(--muted)', fontSize: 10, fontWeight: 900, textTransform: 'uppercase', letterSpacing: 1, display: 'block', marginBottom: 5 }}>{f.label}</label>
+                  <input
+                    type={f.type}
+                    value={(deliveryForm as any)[f.key]}
+                    onChange={e => setDeliveryForm(prev => ({ ...prev, [f.key]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    style={{ width: '100%', background: 'var(--dark)', border: '1px solid var(--border)', color: 'var(--text)', padding: '10px 12px', fontSize: 14, fontFamily: "'Courier New', monospace", outline: 'none', boxSizing: 'border-box' }}
+                    onFocus={e => (e.target.style.borderColor = '#ef4444')}
+                    onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+                  />
+                </div>
+              ))}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 4 }}>
+                <button onClick={() => setShowDeliveryModal(false)}
+                  style={{ padding: '13px', background: 'none', color: 'var(--muted)', border: '1px solid var(--border)', fontWeight: 900, fontSize: 12, textTransform: 'uppercase', cursor: 'pointer', letterSpacing: 1, fontFamily: 'monospace' }}>
+                  Cancelar
+                </button>
+                <button
+                  onClick={confirmarDelivery}
+                  disabled={enviandoDelivery}
+                  style={{ padding: '13px', background: enviandoDelivery ? '#555' : '#ef4444', color: '#fff', border: 'none', fontWeight: 900, fontSize: 12, textTransform: 'uppercase', cursor: enviandoDelivery ? 'not-allowed' : 'pointer', letterSpacing: 1, fontFamily: 'monospace' }}>
+                  {enviandoDelivery ? '...' : '🛵 Enviar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {productoSeleccionado && (
         <ModificadoresModal
           producto={productoSeleccionado}
@@ -1573,7 +1785,7 @@ function ResumenOrden({
   cart, subtotal, total, descuentoMonto, descuento, mesaNombre, tipo, tiempoOrden,
   numPersonas, notaOrden, accentColor,
   onCambiarCantidad, onEliminar, onCobrar, onMandarCocina, onCobrarSeleccion,
-  onDescuento, onCancelar, onPrint, onHistorial, onNumPersonas, onNotaOrden,
+  onDescuento, onCancelar, onPrint, onHistorial, onNumPersonas, onNotaOrden, onDelivery,
 }: {
   cart: CartItem[]
   subtotal: number
@@ -1597,6 +1809,7 @@ function ResumenOrden({
   onHistorial?: () => void
   onNumPersonas: (n: number) => void
   onNotaOrden: (s: string) => void
+  onDelivery?: () => void
 }) {
   const totalItems = cart.reduce((s, i) => s + i.cantidad, 0)
 
@@ -1660,8 +1873,11 @@ function ResumenOrden({
         <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
           <input
             type="text"
+            inputMode="text"
+            enterKeyHint="done"
             value={notaOrden}
             onChange={e => onNotaOrden(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
             placeholder="Nota general de la orden..."
             className="w-full text-xs font-bold px-3 py-2"
             style={{ background: 'var(--dark)', border: '1px solid var(--border)', color: 'var(--text)', outline: 'none' }}
@@ -1711,6 +1927,15 @@ function ResumenOrden({
               onMouseEnter={e => (e.currentTarget.style.background = '#16a34a')}
               onMouseLeave={e => (e.currentTarget.style.background = '#22c55e')}>
               🍽️ Mandar a cocina
+            </button>
+          )}
+          {onDelivery && (
+            <button onClick={onDelivery}
+              className="col-span-2 py-3 font-black text-sm uppercase tracking-widest transition-all"
+              style={{ background: 'none', color: '#ef4444', border: '2px solid #ef4444', cursor: 'pointer' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'none' }}>
+              🛵 Enviar a Repartidor
             </button>
           )}
           <button onClick={onCobrar}
@@ -1951,8 +2176,11 @@ function CartPanel({
           <div className="px-3 py-2 shrink-0" style={{ borderTop: '1px solid var(--border)', background: 'var(--dark)' }}>
             <input
               type="text"
+              inputMode="text"
+              enterKeyHint="done"
               value={notaOrden}
               onChange={e => onNotaOrden(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
               placeholder="Nota general de la orden..."
               className="w-full text-xs font-bold px-2 py-1.5"
               style={{ background: 'transparent', border: '1px solid var(--border)', color: 'var(--text)', outline: 'none', borderRadius: 0 }}
@@ -2010,9 +2238,11 @@ function CartPanel({
                   <div className="flex gap-2">
                     <input
                       type="number"
+                      inputMode="decimal"
+                      enterKeyHint="done"
                       value={descValor}
                       onChange={e => setDescValor(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && aplicarDescuento()}
+                      onKeyDown={e => { if (e.key === 'Enter') { aplicarDescuento(); (e.target as HTMLInputElement).blur() } }}
                       placeholder={descTipo === 'porcentaje' ? 'Ej: 10' : 'Ej: 50'}
                       className="flex-1 py-1.5 text-sm font-black pos-input"
                       style={{ color: accentColor }}

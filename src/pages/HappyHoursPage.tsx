@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabase'
+import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 
 interface Props { cajero: CajeroActivo; onVolver: () => void }
@@ -10,7 +11,7 @@ const DIAS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
 function fmtHora(t: string) {
   const [hh, mm] = t.split(':').map(Number)
   const suffix = hh >= 12 ? 'pm' : 'am'
-  const h = hh > 12 ? hh - 12 : hh === 0 ? 12 : hh
+  const h = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh
   return mm === 0 ? `${h}${suffix}` : `${h}:${String(mm).padStart(2,'0')}${suffix}`
 }
 
@@ -39,9 +40,15 @@ export default function HappyHoursPage({ cajero: _cajero, onVolver }: Props) {
 
   async function cargar() {
     setLoading(true)
-    const { data } = await supabase.from('happy_hours').select('*').order('hora_inicio')
-    setHappyHours((data as HappyHour[]) ?? [])
-    setLoading(false)
+    try {
+      const { data, error } = await supabase.from('happy_hours').select('*').order('hora_inicio')
+      if (error) { toast.error('Error al cargar happy hours'); return }
+      setHappyHours((data as HappyHour[]) ?? [])
+    } catch {
+      // error de red
+    } finally {
+      setLoading(false)
+    }
   }
 
   function abrirForm(hh?: HappyHour) {
@@ -59,6 +66,7 @@ export default function HappyHoursPage({ cajero: _cajero, onVolver }: Props) {
   }
 
   async function guardar(e: React.FormEvent) {
+    if (guardando) return
     e.preventDefault()
     const desc = parseFloat(descuento)
     if (!nombre.trim() || isNaN(desc) || desc <= 0 || dias.length === 0) return
@@ -85,21 +93,30 @@ export default function HappyHoursPage({ cajero: _cajero, onVolver }: Props) {
 
     setGuardando(true)
     const payload = { nombre: nombre.trim(), descuento_porcentaje: desc, hora_inicio: horaInicio, hora_fin: horaFin, dias_semana: dias, activo: true }
+    let opError
     if (editId) {
-      await supabase.from('happy_hours').update(payload).eq('id', editId)
+      const { error } = await supabase.from('happy_hours').update(payload).eq('id', editId)
+      opError = error
     } else {
-      await supabase.from('happy_hours').insert(payload)
+      const { error } = await supabase.from('happy_hours').insert(payload)
+      opError = error
     }
-    setGuardando(false); setShowForm(false); cargar()
+    setGuardando(false)
+    if (opError) { toast.error('Error al guardar: ' + opError.message); return }
+    setShowForm(false); cargar()
   }
 
   async function toggleActivo(hh: HappyHour) {
-    await supabase.from('happy_hours').update({ activo: !hh.activo }).eq('id', hh.id); cargar()
+    const { error } = await supabase.from('happy_hours').update({ activo: !hh.activo }).eq('id', hh.id)
+    if (error) { toast.error('Error al actualizar happy hour'); return }
+    cargar()
   }
 
   async function eliminar(id: string) {
     if (!confirm('¿Eliminar este happy hour?')) return
-    await supabase.from('happy_hours').delete().eq('id', id); cargar()
+    const { error } = await supabase.from('happy_hours').delete().eq('id', id)
+    if (error) { toast.error('Error al eliminar happy hour'); return }
+    cargar()
   }
 
   const s = { background: 'var(--dark)', minHeight: '100vh' }
