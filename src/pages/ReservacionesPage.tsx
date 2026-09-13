@@ -229,7 +229,8 @@ export default function ReservacionesPage({ cajero: _cajero, onClose }: Props) {
       // Ofrecer confirmación por WhatsApp si hay teléfono
       if (form.telefono.trim()) {
         const tel = form.telefono.replace(/\D/g, '')
-        const fechaFmt = new Date(form.fecha + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })
+        const [yr, mo, dy] = form.fecha.split('-').map(Number)
+        const fechaFmt = new Date(yr, mo - 1, dy).toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })
         const msg = `¡Hola ${form.cliente_nombre}! Tu reservación en El Café del Constructor está confirmada para el ${fechaFmt} a las ${form.hora} (${form.personas} persona${form.personas !== 1 ? 's' : ''}). ¡Te esperamos!`
         const telLimpio = tel.replace(/^\+?52/, '').replace(/\D/g, '')
         const waUrl = `https://wa.me/52${telLimpio}?text=${encodeURIComponent(msg)}`

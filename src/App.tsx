@@ -101,7 +101,14 @@ export default function App() {
 
     function aplicarCambio(updated: { rol?: string; nombre?: string; apellido?: string; activo?: boolean }) {
       if (updated.activo === false) {
-        toast.error('Tu cuenta fue desactivada')
+        toast.error('Tu cuenta fue desactivada. Sesión cerrada.')
+        setActiveCajero(null)
+        setScreen('tipo')
+        return
+      }
+      const ROL_CON_ACCESO = ['admin', 'gerente', 'cajero', 'mesero', 'barista']
+      if (updated.rol && !ROL_CON_ACCESO.includes(updated.rol)) {
+        toast.error(`Rol "${updated.rol}" no tiene acceso al POS. Sesión cerrada.`)
         setActiveCajero(null)
         setScreen('tipo')
         return
@@ -116,7 +123,7 @@ export default function App() {
           nombre: updated.nombre ?? prev.nombre,
           last_name: updated.apellido ?? prev.last_name,
           es_admin:  ['admin', 'gerente'].includes(nuevoRol),
-          es_cajero: ['admin', 'gerente', 'cajero', 'mesero', 'barista'].includes(nuevoRol),
+          es_cajero: ROL_CON_ACCESO.includes(nuevoRol),
         }
       })
     }
@@ -131,7 +138,6 @@ export default function App() {
         filter: `id=eq.${activeCajero.id}`,
       }, (payload) => {
         aplicarCambio(payload.new as { rol?: string; nombre?: string; apellido?: string; activo?: boolean })
-        toast.success('Perfil actualizado en tiempo real')
       })
       .subscribe()
 

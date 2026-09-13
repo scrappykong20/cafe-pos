@@ -103,6 +103,7 @@ export default function MesasPage({ cajero, onAbrirMesa, onCambiarCajero, onVolv
     setJuntandoMesas(true)
     try {
       const mesasElegidas = mesas.filter(m => mesasSeleccionadas.includes(m.id))
+      if (mesasElegidas.length === 0) { toast.error('Mesas no encontradas, recarga la página'); return }
       const nombreUnion = mesasElegidas.map(m => m.nombre || `Mesa ${m.numero}`).join(' + ')
 
       // Crear orden especial con mesa_nombre combinado

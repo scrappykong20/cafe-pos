@@ -375,17 +375,14 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
         if (v.metodo_pago === 'tarjeta' || v.metodo_pago === 'mixto') groupedVentas[nombre].propinas_tarjeta += prop
         else groupedVentas[nombre].propinas_efectivo += prop
       })
-      // Merge: si el cajero ya tiene cortes cerrados, reemplazar con datos de ventas (más precisos para el período)
-      // Si no tiene cortes cerrados, usar datos de ventas directamente
+      // Merge: sumar ventas del período a los cortes cerrados de forma aditiva.
+      // Los cortes cerrados ya incluyen sus ventas, así que solo agregamos cajeros
+      // que NO tienen corte cerrado en el período (ventas sin corte = turno aún abierto).
+      const cajeroConCorte = new Set(Object.keys(grouped))
       Object.values(groupedVentas).forEach(gv => {
-        if (!grouped[gv.cajero_nombre]) {
+        if (!cajeroConCorte.has(gv.cajero_nombre)) {
+          // Solo añadir si no tiene corte cerrado — evita duplicar ventas ya contabilizadas
           grouped[gv.cajero_nombre] = gv
-        } else {
-          // Comparar y tomar el mayor (ventas directas son más completas)
-          const existing = grouped[gv.cajero_nombre]
-          if (gv.num_ventas > existing.num_ventas) {
-            grouped[gv.cajero_nombre] = gv
-          }
         }
       })
       setSemanaData(Object.values(grouped).sort((a, b) => b.total_ventas - a.total_ventas))

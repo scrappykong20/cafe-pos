@@ -250,7 +250,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
 
   async function buscarPorTelefono() {
     const query = telefonoInput.trim()
-    if (!query || query.length < 3) { toast.error('Ingresa al menos 3 caracteres'); return }
+    if (!query?.trim() || query.trim().length < 3) { toast.error('Ingresa al menos 3 caracteres'); return }
     setBuscando(true)
     try {
       const SELECT = 'id, nombre, last_name, correo, telefono, engranajes, nivel, racha_dias, ultima_visita, cumple_anio, fecha_nac, es_empleado'
@@ -703,6 +703,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         total: totalACobrar,
         metodo_pago: metodoPago,
         efectivo_recibido: metodoPago === 'efectivo' ? efectivo : metodoPago === 'mixto' ? efectivoMixtoVal : null,
+        tarjeta_recibido: metodoPago === 'tarjeta' ? totalACobrar : metodoPago === 'mixto' ? tarjetaMixtoVal : null,
         cambio: metodoPago === 'efectivo' ? cambio : metodoPago === 'mixto' ? cambio : null,
         engranajes_ganados: cliente ? engranajes : 0,
         estado: 'completada',
@@ -936,8 +937,9 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
           subtotal:          total + (descuentoMonto ?? 0),
           descuento:         Math.min((descuentoMonto ?? 0) + montoCanjeado + descEmpleadoMonto + descPromoMonto + descCuponMonto + descVolumenMonto, total + (descuentoMonto ?? 0)),
           total:             totalACobrar,
-          efectivo_recibido: metodoPago === 'efectivo' || metodoPago === 'mixto' ? efectivoMixtoVal || efectivo : null,
-          cambio:            metodoPago === 'efectivo' || metodoPago === 'mixto' ? cambio : null,
+          efectivo_recibido: metodoPago === 'efectivo' ? efectivo : metodoPago === 'mixto' ? efectivoMixtoVal : null,
+          tarjeta_recibido:  metodoPago === 'tarjeta' ? totalACobrar : metodoPago === 'mixto' ? tarjetaMixtoVal : null,
+          cambio:            metodoPago === 'efectivo' ? cambio : metodoPago === 'mixto' ? cambio : null,
           propina:           propinaMonto,
           engranajes_ganados: cliente ? engranajes : 0,
           usuario_id:        cliente?.id ?? null,

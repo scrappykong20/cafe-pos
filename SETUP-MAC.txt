@@ -1,0 +1,131 @@
+===============================================================
+  CAFE POS — SETUP EN MAC
+  El Café del Constructor
+===============================================================
+
+INSTRUCCIONES PARA KIMI:
+Ayúdame a configurar este proyecto en mi Mac.
+Sigue los pasos en orden exactamente como están.
+
+---------------------------------------------------------------
+PASO 1 — REQUISITOS PREVIOS
+---------------------------------------------------------------
+
+Instala estas herramientas si no las tienes:
+
+- Node.js 20 o mayor: https://nodejs.org (descarga LTS)
+- Git: viene instalado en Mac, verifica con: git --version
+- Si pide instalar Xcode Command Line Tools, acepta
+
+Verifica que todo esté instalado:
+  node --version   (debe mostrar v20.x o mayor)
+  npm --version    (debe mostrar 10.x o mayor)
+  git --version
+
+---------------------------------------------------------------
+PASO 2 — CLONAR EL PROYECTO
+---------------------------------------------------------------
+
+Abre Terminal y corre:
+
+  cd ~/Desktop
+  git clone https://github.com/scrappykong20/cafe-pos.git
+  cd cafe-pos
+
+---------------------------------------------------------------
+PASO 3 — INSTALAR DEPENDENCIAS
+---------------------------------------------------------------
+
+  npm install
+
+(Esto puede tardar 2-5 minutos, es normal)
+
+---------------------------------------------------------------
+PASO 4 — CREAR ARCHIVO .env
+---------------------------------------------------------------
+
+Crea el archivo .env en la raíz del proyecto.
+En Terminal, estando dentro de la carpeta cafe-pos, corre:
+
+  cat > .env << 'ENVEOF'
+VITE_SUPABASE_URL=https://lycrdngkgnkvduahkljk.supabase.co
+VITE_SUPABASE_ANON_KEY=sb_publishable_aMqLnjdw3F5QdJ-pCb5iBQ_EcQKb_qq
+VITE_POS_EMAIL=pos-terminal@elcafedelconstructor.com.mx
+VITE_POS_PASSWORD=CafePOS#2025!Seguro
+VITE_MP_ACCESS_TOKEN=APP_USR-7974539993121612-070720-a94731aadee1122972477e9761582005-3469089768
+VITE_MP_DEVICE_ID=NEWLAND_N950__N950NCC704047478
+ENVEOF
+
+Verifica que se creó bien con:
+  cat .env
+
+---------------------------------------------------------------
+PASO 5 — CORRER EN MODO DESARROLLO (para probar)
+---------------------------------------------------------------
+
+  npm run dev
+
+Esto abre el POS en el navegador en http://localhost:5173
+Para cerrar: Ctrl+C en la Terminal
+
+---------------------------------------------------------------
+PASO 6 — COMPILAR APP DE ESCRITORIO PARA MAC (.dmg)
+---------------------------------------------------------------
+
+  npm run build
+  npx electron-builder --mac
+
+El instalador .dmg quedará en la carpeta:
+  ~/Desktop/cafe-pos/dist/
+  o en la carpeta que diga "output" al terminar
+
+(La primera vez descarga Electron ~100MB, es normal que tarde)
+
+---------------------------------------------------------------
+FLUJO DIARIO — SINCRONIZAR CAMBIOS
+---------------------------------------------------------------
+
+Antes de empezar a trabajar, baja los últimos cambios:
+  cd ~/Desktop/cafe-pos
+  git pull
+
+Si hiciste cambios y quieres subirlos a GitHub:
+  git add -A
+  git commit -m "descripción de lo que hice"
+  git push
+
+---------------------------------------------------------------
+DATOS DEL PROYECTO
+---------------------------------------------------------------
+
+Repositorio GitHub : https://github.com/scrappykong20/cafe-pos
+Backend (Supabase) : https://lycrdngkgnkvduahkljk.supabase.co
+Stack              : React + TypeScript + Electron + Supabase
+Versión actual     : 2.5.0
+
+El backend (base de datos) está en la nube (Supabase).
+Es el mismo para Mac y Windows — no necesitas configurar nada.
+Solo el .env es diferente por máquina y NO va a GitHub.
+
+---------------------------------------------------------------
+SI ALGO FALLA
+---------------------------------------------------------------
+
+Error "node_modules not found":
+  npm install
+
+Error de permisos en Mac:
+  sudo npm install -g electron-builder
+
+Error "cannot find module":
+  rm -rf node_modules
+  npm install
+
+Error al compilar .dmg (falta Xcode):
+  xcode-select --install
+
+Para correr solo la parte web (sin Electron):
+  npm run dev
+  Abre http://localhost:5173 en Safari o Chrome
+
+===============================================================

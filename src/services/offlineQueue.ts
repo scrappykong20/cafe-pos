@@ -29,6 +29,7 @@ export interface VentaOffline {
   descuento: number
   total: number
   efectivo_recibido: number | null
+  tarjeta_recibido: number | null
   cambio: number | null
   propina: number
   engranajes_ganados: number
@@ -104,6 +105,7 @@ export async function syncOfflineQueue(): Promise<number> {
           total:            venta.total,
           metodo_pago:      venta.metodo_pago,
           efectivo_recibido: venta.efectivo_recibido,
+          tarjeta_recibido:  venta.tarjeta_recibido,
           cambio:           venta.cambio,
           engranajes_ganados: venta.engranajes_ganados,
           estado:           'completada',
