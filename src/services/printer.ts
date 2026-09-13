@@ -8,6 +8,7 @@
 /*  Inicia con: node print-server/server.js                            */
 /* ------------------------------------------------------------------ */
 import { LOGO_ESCPOS } from './logo-escpos'
+import { logger } from './logger'
 
 const PRINT_SERVER = 'http://127.0.0.1:3002'
 
@@ -25,9 +26,15 @@ export function qzDisponible(): boolean { return true }
 export async function listarImpresoras(): Promise<string[]> {
   try {
     const res = await fetch(`${PRINT_SERVER}/printers`)
-    if (!res.ok) return []
+    if (!res.ok) {
+      void logger.warn('impresora', `Servidor impresión respondió ${res.status}`)
+      return []
+    }
     return await res.json() as string[]
-  } catch { return [] }
+  } catch (err) {
+    void logger.error('impresora', 'No se pudo conectar al servidor de impresión (puerto 3002)', { error: String(err) })
+    return []
+  }
 }
 
 // ─── ESC/POS builder ──────────────────────────────────────────────────────────
@@ -131,9 +138,13 @@ export async function imprimirHTML(printerName: string, data: string): Promise<b
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ printer: printerName, data }),
     })
-    const json = await res.json() as { ok: boolean }
+    const json = await res.json() as { ok: boolean; error?: string }
+    if (!json.ok) {
+      void logger.warn('impresora', `Impresión falló en "${printerName}"`, { respuesta: json })
+    }
     return json.ok === true
   } catch (err) {
+    void logger.error('impresora', `Sin conexión al servidor de impresión — impresora: "${printerName}"`, { error: String(err) })
     console.error('[printer] Error al conectar con servidor de impresión:', err)
     return false
   }

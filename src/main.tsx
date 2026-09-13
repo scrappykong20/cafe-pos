@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client'
 import { Toaster } from 'react-hot-toast'
 import './index.css'
 import App from './App.tsx'
+import { iniciarLoggerGlobal } from './services/logger.ts'
+
+iniciarLoggerGlobal()
 import CustomerDisplayPage from './pages/CustomerDisplayPage.tsx'
 import TouchKeyboard from './components/TouchKeyboard.tsx'
 

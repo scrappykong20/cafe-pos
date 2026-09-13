@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../supabase'
 import toast from 'react-hot-toast'
+import { logger } from '../services/logger'
 
 interface StaffMember {
   id: string
@@ -111,6 +112,7 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
     const { data, error } = await supabase
       .from('personal').select('id, nombre, apellido, rol, pin').eq('activo', true)
     if (error || !data) {
+      void logger.warn('login', 'cargarPersonal falló — intentando caché', { error: error?.message, online: navigator.onLine })
       // Sin internet — intentar caché local
       try {
         const cached = localStorage.getItem(PERSONAL_CACHE_KEY)
@@ -384,7 +386,11 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
     setLoginAdmin(true)
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-      if (error) { toast.error('Credenciales incorrectas'); return }
+      if (error) {
+        void logger.error('login', 'Email login falló', { error: error.message, email })
+        toast.error('Credenciales incorrectas')
+        return
+      }
       if (data.user) {
         const { data: perfil, error: perfilError } = await supabase
           .from('usuarios').select('id, nombre, last_name, es_admin, es_cajero')

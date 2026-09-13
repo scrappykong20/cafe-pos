@@ -31,6 +31,7 @@ import { registrarAccion } from './services/auditLog'
 import { crearTicket, imprimirPorTipo, hayImpresora, listarImpresoras, getSlot, setSlot } from './services/printer'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
 import { syncOfflineQueue, getPendingCount, clearSynced } from './services/offlineQueue'
+import { logger } from './services/logger'
 
 export interface CajeroActivo {
   id: string
@@ -245,13 +246,18 @@ export default function App() {
           })
           if (error) {
             console.error('[POS] Error al iniciar sesión de servicio:', error.message)
+            void logger.error('auth', 'Login de servicio POS falló', { error: error.message })
             toast.error('Error de conexión con el servidor — verifica credenciales POS')
+          } else {
+            void logger.info('auth', 'POS iniciado correctamente', { online: navigator.onLine })
           }
         } else {
           console.warn('[POS] VITE_POS_EMAIL / VITE_POS_PASSWORD no configurados — algunas funciones pueden fallar')
+          void logger.warn('auth', 'VITE_POS_EMAIL/PASSWORD no configurados')
         }
       } catch (err) {
         console.error('[POS] Error inesperado en auth:', err)
+        void logger.error('auth', 'Error inesperado al iniciar POS', { error: String(err) })
       } finally {
         setSesionActiva(true)
         setLoading(false)
