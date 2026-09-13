@@ -296,7 +296,14 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
 
   async function ajustarStock(item: InventarioItem, delta: number) {
     const prevStock = item.stock_actual
-    const newStock  = Math.max(0, prevStock + delta)
+    const newStock  = prevStock + delta
+
+    // Bloquear si quedaría negativo
+    if (newStock < 0) {
+      toast.error(`Stock insuficiente — solo hay ${prevStock} ${item.unidad ?? 'unidades'}`)
+      return
+    }
+
     setAjustando(item.id)
 
     // Optimistic update
@@ -316,7 +323,7 @@ export default function InventarioPage({ cajero, onVolver }: Props) {
       )
       toast.error('Error actualizando stock')
     } else {
-      // Log to historial silently
+      // Log to historial silently — usa el delta real (no clampeado)
       try {
         await supabase.from('historial_inventario').insert({
           inventario_id: item.id,

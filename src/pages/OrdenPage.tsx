@@ -703,14 +703,17 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
     // BUG 17 — evitar doble envío concurrente
     if (mandando) return
     setMandando(true)
+    // Capturar estado actual al inicio — evita que cambios async en cart/snapshot afecten el diff
+    const cartSnapshot     = [...cart]
+    const cocinaSnapshot   = new Map(snapshotCocina)
     try {
-    if (cart.length === 0) { toast.error('Agrega productos primero'); return }
+    if (cartSnapshot.length === 0) { toast.error('Agrega productos primero'); return }
     if (!ordenId) { toast.error('No hay orden activa'); return }
 
     // Calcular solo los items NUEVOS o con cantidad aumentada desde el último envío
-    const itemsNuevos = cart
+    const itemsNuevos = cartSnapshot
       .map(item => {
-        const cantidadYaEnviada = snapshotCocina.get(item.menu_id) ?? 0
+        const cantidadYaEnviada = cocinaSnapshot.get(item.menu_id) ?? 0
         const cantidadNueva = item.cantidad - cantidadYaEnviada
         return cantidadNueva > 0 ? { ...item, cantidad: cantidadNueva } : null
       })
@@ -740,8 +743,8 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
       void imprimirPorTipo('cocina', html)
     }
 
-    // Actualizar snapshot: ahora todo el carrito actual está en cocina
-    setSnapshotCocina(new Map(cart.map(i => [i.menu_id, i.cantidad])))
+    // Actualizar snapshot con el cart capturado al inicio (no el que pudo cambiar mientras esperábamos)
+    setSnapshotCocina(new Map(cartSnapshot.map(i => [i.menu_id, i.cantidad])))
 
     toast.success('🍳 ¡Orden mandada a cocina!')
     onVolver()

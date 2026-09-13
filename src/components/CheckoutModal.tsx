@@ -793,13 +793,14 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       }
 
       if (ordenId) {
-        await supabase.from('ordenes').update({ estado: 'pagada', cerrada_at: new Date().toISOString() }).eq('id', ordenId)
-      }
-      if (ordenId) {
-        // Libera todas las mesas de la orden (incluye mesas juntadas)
-        await supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('orden_id', ordenId)
+        const { error: errOrden } = await supabase.from('ordenes').update({ estado: 'pagada', cerrada_at: new Date().toISOString() }).eq('id', ordenId)
+        if (errOrden) console.warn('[checkout] Error marcando orden pagada:', errOrden.message)
+        // Libera todas las mesas de la orden (incluye mesas juntadas) — siempre intentar aunque falle orden
+        const { error: errMesa } = await supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('orden_id', ordenId)
+        if (errMesa) console.warn('[checkout] Error liberando mesas por orden:', errMesa.message)
       } else if (mesaId) {
-        await supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('id', mesaId)
+        const { error: errMesa } = await supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('id', mesaId)
+        if (errMesa) console.warn('[checkout] Error liberando mesa:', errMesa.message)
       }
 
       if (cliente?.id) {
@@ -874,19 +875,16 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         }
       }
 
-      // Incrementar uso de cupón si aplica — incremento atómico en BD para evitar race condition
+      // Incrementar uso de cupón — RPC atómico con FOR UPDATE (evita race condition entre cajeros)
       if (cuponAplicado) {
-        const { error: cuponError } = await supabase.rpc('incrementar_uso_cupon', {
+        const { data: cuponRes, error: cuponError } = await supabase.rpc('incrementar_uso_cupon', {
           p_cupon_id: cuponAplicado.id,
           p_usos_maximos: cuponAplicado.usos_maximos ?? 999999,
         })
-        if (cuponError) {
-          // Fallback: UPDATE plano si el RPC no existe todavía
-          await supabase
-            .from('cupones')
-            .update({ usos_actuales: (cuponAplicado.usos_actuales ?? 0) + 1 })
-            .eq('id', cuponAplicado.id)
-            .lt('usos_actuales', cuponAplicado.usos_maximos ?? 999999)
+        if (cuponError || (cuponRes as any)?.error) {
+          // El RPC retorna { error: 'Cupón agotado' } si ya llegó al límite entre el check y aquí
+          // No cancelamos la venta (ya se registró), pero logueamos la inconsistencia
+          console.warn('[checkout] Cupón no pudo incrementarse:', cuponError?.message ?? (cuponRes as any)?.error)
         }
       }
 
