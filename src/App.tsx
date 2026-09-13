@@ -294,7 +294,7 @@ export default function App() {
     // Verificar si ya hay UNA CAJA ABIERTA HOY (de cualquier cajero)
     // Si alguien ya abrió caja, los demás cajeros no necesitan volver a abrirla
     const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
-    const { data: cajaAbierta } = await supabase
+    const { data: cajaAbierta, error: errCaja } = await supabase
       .from('cortes_caja')
       .select('id')
       .eq('estado', 'abierto')
@@ -303,8 +303,20 @@ export default function App() {
       .maybeSingle()
 
     if (cajaAbierta) {
+      // Cachear el ID del corte activo para modo offline
+      try { localStorage.setItem('pos_corte_activo_id', cajaAbierta.id) } catch {}
       setScreen('tipo')
+    } else if (errCaja || !navigator.onLine) {
+      // Sin internet — usar caché para saber si la caja ya fue abierta
+      const cachedCorteId = localStorage.getItem('pos_corte_activo_id')
+      if (cachedCorteId) {
+        setScreen('tipo')
+      } else {
+        setScreen('apertura_caja')
+      }
     } else {
+      // Online y sin caja abierta — limpiar caché
+      try { localStorage.removeItem('pos_corte_activo_id') } catch {}
       setScreen('apertura_caja')
     }
     // D3 — Audit log: login exitoso

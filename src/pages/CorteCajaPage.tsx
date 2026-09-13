@@ -550,6 +550,8 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
       const corteData = updatedCorte as CorteCaja
       setTurnoFinalizado(corteData)
       setCorteActivo(null)
+      // Limpiar caché de corte activo — mañana pedirá apertura de nuevo
+      try { localStorage.removeItem('pos_corte_activo_id') } catch {}
       // D3 — Audit log: corte de caja
       registrarAccion(
         'corte_caja',

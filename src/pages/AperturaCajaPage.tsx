@@ -30,6 +30,12 @@ export default function AperturaCajaPage({ cajero, onAperturado, onSalir }: Prop
     if (totalFondo < 0) return
     setAbriendo(true)
     try {
+      // Sin internet — no se puede abrir caja por primera vez offline
+      if (!navigator.onLine) {
+        toast.error('Sin conexión — conecta a internet para abrir la caja por primera vez')
+        return
+      }
+
       // Verificar que no haya ya una caja abierta hoy (de cualquier cajero)
       const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
       const { data: yaAbierto } = await supabase
@@ -40,12 +46,13 @@ export default function AperturaCajaPage({ cajero, onAperturado, onSalir }: Prop
         .limit(1)
         .maybeSingle()
       if (yaAbierto) {
+        try { localStorage.setItem('pos_corte_activo_id', yaAbierto.id) } catch {}
         toast('La caja ya fue abierta por otro cajero.', { icon: 'ℹ️' })
         onAperturado()
         return
       }
 
-      const { error } = await supabase.from('cortes_caja').insert({
+      const { data: nuevoCorte, error } = await supabase.from('cortes_caja').insert({
         cajero_id: cajero.id,
         cajero_nombre: `${cajero.nombre} ${cajero.last_name}`,
         fondo_inicial: totalFondo,
@@ -60,8 +67,12 @@ export default function AperturaCajaPage({ cajero, onAperturado, onSalir }: Prop
         total_propinas_tarjeta: 0,
         total_propinas_efectivo: 0,
         apertura_at: new Date().toISOString(),
-      })
+      }).select('id').single()
       if (error) throw error
+      // Cachear el ID del corte para modo offline
+      if (nuevoCorte?.id) {
+        try { localStorage.setItem('pos_corte_activo_id', nuevoCorte.id) } catch {}
+      }
       toast.success(`✅ Caja abierta · Fondo: $${totalFondo.toFixed(2)}`)
       onAperturado()
     } catch (err: any) {

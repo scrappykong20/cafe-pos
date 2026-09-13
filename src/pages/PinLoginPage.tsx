@@ -35,6 +35,8 @@ const WMO: Record<number, { desc: string; icon: string }> = {
   95: { desc: 'Tormenta',       icon: '⛈️' },
 }
 
+const PERSONAL_CACHE_KEY = 'pos_personal_cache'
+
 const ROL_LABELS: Record<string, string> = {
   admin: 'Administrador', cajero: 'Cajero', cocinero: 'Cocinero',
   mesero: 'Mesero', barista: 'Barista', gerente: 'Gerente',
@@ -108,11 +110,21 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
   async function cargarPersonal() {
     const { data, error } = await supabase
       .from('personal').select('id, nombre, apellido, rol, pin').eq('activo', true)
-    if (error) {
-      toast.error('Error al cargar empleados — verifica conexión')
+    if (error || !data) {
+      // Sin internet — intentar caché local
+      try {
+        const cached = localStorage.getItem(PERSONAL_CACHE_KEY)
+        if (cached) {
+          setPersonal(JSON.parse(cached) as StaffMember[])
+          return
+        }
+      } catch {}
+      toast.error('Sin conexión — conecta a internet una vez para activar el modo offline')
       return
     }
-    if (data) setPersonal(data as StaffMember[])
+    // Guardar en caché para uso offline
+    try { localStorage.setItem(PERSONAL_CACHE_KEY, JSON.stringify(data)) } catch {}
+    setPersonal(data as StaffMember[])
   }
 
   async function cargarEstadisticas() {
@@ -159,7 +171,12 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
   async function verificarSistema() {
     try {
       const { error } = await supabase.from('personal').select('id').limit(1)
-      setSistemaOk(!error)
+      if (!error) { setSistemaOk(true); return }
+    } catch {}
+    // Sin conexión — considerar OK si hay caché local disponible
+    try {
+      const cached = localStorage.getItem(PERSONAL_CACHE_KEY)
+      setSistemaOk(!!cached)
     } catch { setSistemaOk(false) }
   }
 
@@ -778,8 +795,8 @@ export default function PinLoginPage({ onLogin, sesionActiva }: Props) {
                 )}
                 {/* Sistema */}
                 <div className="footer-pill">
-                  <div style={{ width:6, height:6, borderRadius:'50%', background: sistemaOk ? '#22c55e' : '#ef4444', boxShadow:`0 0 6px ${sistemaOk ? '#22c55e' : '#ef4444'}` }} />
-                  <span className="footer-pill-text">{sistemaOk ? 'En línea' : 'Sin conexión'}</span>
+                  <div style={{ width:6, height:6, borderRadius:'50%', background: sistemaOk ? (navigator.onLine ? '#22c55e' : '#F0A800') : '#ef4444', boxShadow:`0 0 6px ${sistemaOk ? (navigator.onLine ? '#22c55e' : '#F0A800') : '#ef4444'}` }} />
+                  <span className="footer-pill-text">{sistemaOk ? (navigator.onLine ? 'En línea' : 'Modo offline') : 'Sin conexión'}</span>
                 </div>
               </div>
 
