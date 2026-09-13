@@ -149,7 +149,7 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
   async function cargarVentasHoy(aperturaAt: string) {
     const { data } = await supabase
       .from('ventas')
-      .select('total, metodo_pago, created_at')
+      .select('total, metodo_pago, efectivo_recibido, tarjeta_recibido, created_at')
       .gte('created_at', aperturaAt)
       .eq('estado', 'completada')
 
@@ -160,12 +160,19 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     let totalMixto = 0
     const porHora: Record<number, number> = {}
 
-    data.forEach((v: { total: number; metodo_pago: string; created_at: string }) => {
+    data.forEach((v: { total: number; metodo_pago: string; efectivo_recibido: number | null; tarjeta_recibido: number | null; created_at: string }) => {
       const hora = new Date(v.created_at).getHours()
       porHora[hora] = (porHora[hora] ?? 0) + Number(v.total)
-      if (v.metodo_pago === 'efectivo') totalEfectivo += Number(v.total)
-      else if (v.metodo_pago === 'tarjeta') totalTarjeta += Number(v.total)
-      else if (v.metodo_pago === 'mixto') totalMixto += Number(v.total)
+      if (v.metodo_pago === 'efectivo') {
+        totalEfectivo += Number(v.total)
+      } else if (v.metodo_pago === 'tarjeta') {
+        totalTarjeta += Number(v.total)
+      } else if (v.metodo_pago === 'mixto') {
+        totalMixto += Number(v.total)
+        // Para mixto, el efectivo_recibido va a la caja física
+        totalEfectivo += Number(v.efectivo_recibido ?? 0)
+        totalTarjeta += Number(v.tarjeta_recibido ?? 0)
+      }
     })
 
     setVentasResumen({
@@ -464,7 +471,7 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     try {
       const { data: ventasEfectivo, error: errVentas } = await supabase
         .from('ventas')
-        .select('total, metodo_pago, propina')
+        .select('total, metodo_pago, efectivo_recibido, tarjeta_recibido, propina')
         .gte('created_at', corteActivo.apertura_at)
         .eq('estado', 'completada')
 
@@ -477,14 +484,21 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
       let totalPropinasTarjeta = 0
       let totalPropinasEfectivo = 0
 
-      ;(ventasEfectivo || []).forEach((v: { total: number; metodo_pago: string; propina?: number }) => {
+      ;(ventasEfectivo || []).forEach((v: { total: number; metodo_pago: string; efectivo_recibido: number | null; tarjeta_recibido: number | null; propina?: number }) => {
         numVentasTotal++
         const prop = Number(v.propina ?? 0)
         if (v.metodo_pago === 'tarjeta' || v.metodo_pago === 'mixto') totalPropinasTarjeta += prop
         else totalPropinasEfectivo += prop
-        if (v.metodo_pago === 'efectivo') totalEfectivoVentas += Number(v.total)
-        else if (v.metodo_pago === 'tarjeta') totalTarjetaVentas += Number(v.total)
-        else if (v.metodo_pago === 'mixto') totalMixtoVentas += Number(v.total)
+        if (v.metodo_pago === 'efectivo') {
+          totalEfectivoVentas += Number(v.total)
+        } else if (v.metodo_pago === 'tarjeta') {
+          totalTarjetaVentas += Number(v.total)
+        } else if (v.metodo_pago === 'mixto') {
+          totalMixtoVentas += Number(v.total)
+          // Para mixto, separar el efectivo_recibido (va a la caja) del tarjeta_recibido
+          totalEfectivoVentas += Number(v.efectivo_recibido ?? 0)
+          totalTarjetaVentas += Number(v.tarjeta_recibido ?? 0)
+        }
       })
 
       const entradas = movimientos
