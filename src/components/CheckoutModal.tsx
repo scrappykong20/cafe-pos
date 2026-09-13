@@ -610,7 +610,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     })
 
     if (!hayImpresora('caja')) {
-      toast('No hay impresora de caja configurada', { icon: '⚠️', duration: 3000 })
+      toast('No hay impresora configurada — ve a Configuración → Impresoras', { icon: '🖨️', duration: 5000 })
       return
     }
     const ok = await imprimirPorTipo('caja', escpos)

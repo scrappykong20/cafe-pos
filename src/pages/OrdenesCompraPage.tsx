@@ -268,7 +268,7 @@ export default function OrdenesCompraPage({ cajero, onVolver }: Props) {
 
   async function imprimirOC() {
     if (!ocGenerada) return
-    if (!hayImpresora('caja')) { return }
+    if (!hayImpresora('caja')) { toast('No hay impresora configurada — ve a Configuración → Impresoras', { icon: '🖨️', duration: 5000 }); return }
 
     const oc = ocGenerada
     const fecha = new Date().toLocaleString('es-MX', { dateStyle: 'medium', timeStyle: 'short' })

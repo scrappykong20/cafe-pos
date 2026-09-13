@@ -250,7 +250,10 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
     movs: Movimiento[],
     propinasTurnos?: { manana: { tarjeta: number; efectivo: number }; tarde: { tarjeta: number; efectivo: number } }
   ) {
-    if (!hayImpresora('caja')) { return }
+    if (!hayImpresora('caja')) {
+      toast('No hay impresora configurada — ve a Configuración → Impresoras', { icon: '🖨️', duration: 5000 })
+      return
+    }
 
     const fmt  = (n: number) => '$' + n.toFixed(2)
     const fmtH = (iso: string) => new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
@@ -400,7 +403,10 @@ export default function CorteCajaPage({ cajero, onVolver, onCerrarSesion, onIrAp
   }
 
   async function imprimirSemana() {
-    if (!hayImpresora('caja')) { return }
+    if (!hayImpresora('caja')) {
+      toast('No hay impresora configurada — ve a Configuración → Impresoras', { icon: '🖨️', duration: 5000 })
+      return
+    }
 
     const fmt = (n: number) => '$' + n.toFixed(2)
     const totalVentas       = semanaData.reduce((s, r) => s + r.total_ventas, 0)
