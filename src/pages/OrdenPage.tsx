@@ -367,7 +367,13 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
   }, [mesaId])
 
   useEffect(() => {
-    const t = setTimeout(() => setLoading(prev => { if (prev) setError('Tiempo agotado.'); return false }), 10000)
+    // Si la carga sigue sin terminar a los 10s, mostrar error de tiempo agotado.
+    // Si cargarDatos termina antes, su finally ya apagó el loading y aquí
+    // solo cancelamos el timeout — ambos setState fuera de cualquier updater.
+    const t = setTimeout(() => {
+      setError('Tiempo agotado.')
+      setLoading(false)
+    }, 10000)
     cargarDatos().finally(() => clearTimeout(t))
   }, [cargarDatos])
 
@@ -1508,6 +1514,8 @@ export default function OrdenPage({ mesaId, mesaNombre, cajero, tipo, onVolver }
           descuentoMonto={checkoutItems ? 0 : descuentoMonto}
           mesaId={currentMesaId ?? ''} mesaNombre={currentMesaNombre}
           ordenId={ordenId} cajero={cajero}
+          // BUG 1 — cuando se cobra solo un subset (split), el modal no debe cerrar la orden
+          esPagoParcial={!!checkoutItems}
           onClose={() => { setShowCheckout(false); setCheckoutItems(null) }}
           onCompletado={() => {
             if (checkoutItems) {

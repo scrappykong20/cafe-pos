@@ -23,6 +23,7 @@ export interface VentaOffline {
   cajero_id: string
   cajero_nombre: string
   mesa_nombre: string
+  mesa_id?: string | null       // BUG 4: para liberar mesa sin orden al sincronizar
   orden_id: string | null
   metodo_pago: 'efectivo' | 'tarjeta' | 'mixto'
   subtotal: number
@@ -33,12 +34,15 @@ export interface VentaOffline {
   cambio: number | null
   propina: number
   engranajes_ganados: number
+  engranajes_canjeados?: number // BUG 4: engranajes gastados en canje (se restan al sincronizar)
   usuario_id: string | null
   rfc_cliente?: string
   items: CartItemOffline[]
   synced: boolean
   // BUG 3: ID de la venta ya insertada en BD (para reintentar solo los items sin duplicar la venta)
   venta_id_bd?: string
+  // BUG 1: cobro parcial (split) — no cerrar orden ni liberar mesas al sincronizar
+  es_pago_parcial?: boolean
 }
 
 function getQueue(): VentaOffline[] {
@@ -145,14 +149,19 @@ export async function syncOfflineQueue(): Promise<number> {
         continue
       }
 
-      // 3. Si había orden activa, marcarla pagada
-      if (venta.orden_id) {
+      // 3. Si había orden activa, marcarla pagada (no aplica en cobro parcial — BUG 1)
+      if (venta.orden_id && !venta.es_pago_parcial) {
         await supabase.from('ordenes')
           .update({ estado: 'pagada', cerrada_at: venta.timestamp })
           .eq('id', venta.orden_id)
         await supabase.from('mesas')
           .update({ estado: 'libre', orden_id: null })
           .eq('orden_id', venta.orden_id)
+      } else if (!venta.orden_id && venta.mesa_id && !venta.es_pago_parcial) {
+        // BUG 4: venta directa con mesa (sin orden) — liberar la mesa al sincronizar
+        await supabase.from('mesas')
+          .update({ estado: 'libre', orden_id: null })
+          .eq('id', venta.mesa_id)
       }
 
       // 3b. Descontar inventario (receta si existe, fallback directo)
@@ -192,8 +201,9 @@ export async function syncOfflineQueue(): Promise<number> {
         }
       }
 
-      // 4. Actualizar engranajes del cliente si aplica
-      if (venta.usuario_id && venta.engranajes_ganados > 0) {
+      // 4. Actualizar engranajes del cliente si aplica (ganados menos canjeados — BUG 4)
+      const engCanjeados = venta.engranajes_canjeados ?? 0
+      if (venta.usuario_id && (venta.engranajes_ganados > 0 || engCanjeados > 0)) {
         const { data: ud } = await supabase
           .from('usuarios')
           .select('engranajes, engranajes_acumulados')
@@ -201,15 +211,25 @@ export async function syncOfflineQueue(): Promise<number> {
           .single()
         if (ud) {
           await supabase.from('usuarios').update({
-            engranajes:            (ud.engranajes ?? 0) + venta.engranajes_ganados,
+            engranajes:            (ud.engranajes ?? 0) + venta.engranajes_ganados - engCanjeados,
             engranajes_acumulados: (ud.engranajes_acumulados ?? 0) + venta.engranajes_ganados,
           }).eq('id', venta.usuario_id)
-          await supabase.from('historial').insert({
-            usuario_id: venta.usuario_id,
-            tipo: 'recarga',
-            engranajes: venta.engranajes_ganados,
-            titulo: `Venta offline sincronizada — ${venta.mesa_nombre}`,
-          })
+          if (engCanjeados > 0) {
+            await supabase.from('historial').insert({
+              usuario_id: venta.usuario_id,
+              tipo: 'canje',
+              engranajes: -engCanjeados,
+              titulo: `Canje offline sincronizado — ${venta.mesa_nombre}`,
+            })
+          }
+          if (venta.engranajes_ganados > 0) {
+            await supabase.from('historial').insert({
+              usuario_id: venta.usuario_id,
+              tipo: 'recarga',
+              engranajes: venta.engranajes_ganados,
+              titulo: `Venta offline sincronizada — ${venta.mesa_nombre}`,
+            })
+          }
         }
       }
 

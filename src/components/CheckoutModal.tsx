@@ -31,6 +31,8 @@ interface Props {
   onCompletado: () => void
   // C4 — split: cobrar solo un subset de ítems
   onCobrarParcial?: (items: CartItem[]) => void
+  // BUG 1 — true cuando este modal cobra solo una parte de la orden (cuenta dividida)
+  esPagoParcial?: boolean
 }
 
 type MetodoPago = 'efectivo' | 'tarjeta' | 'mixto'
@@ -82,7 +84,7 @@ function nivelColor(nivel: string | null) {
   }
 }
 
-export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mesaNombre, ordenId, cajero, onClose, onCompletado, onCobrarParcial }: Props) {
+export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mesaNombre, ordenId, cajero, onClose, onCompletado, onCobrarParcial, esPagoParcial }: Props) {
   const [paso, setPaso] = useState<Paso>('pago')
   const [metodoPago, setMetodoPago] = useState<MetodoPago>('efectivo')
   const [efectivoInput, setEfectivoInput] = useState('')
@@ -231,21 +233,24 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       ? (total * cuponAplicado.valor) / 100
       : cuponAplicado.valor
     : 0
-  const totalACobrar = Math.max(0, total - montoCanjeado - descEmpleadoMonto - descPromoMonto - descCuponMonto - descVolumenMonto) + propinaMonto
+  // Redondeo a centavos: evita que errores de punto flotante
+  // (ej. 25.1 - 5.1 = 20.000000000000004) rechacen un pago exacto
+  const r2 = (n: number) => Math.round(n * 100) / 100
+  const totalACobrar = r2(Math.max(0, total - montoCanjeado - descEmpleadoMonto - descPromoMonto - descCuponMonto - descVolumenMonto) + propinaMonto)
   const efectivo = parseFloat(efectivoInput) || 0
   const efectivoMixtoVal = parseFloat(efectivoMixto) || 0
   const tarjetaMixtoVal = parseFloat(tarjetaMixto) || 0
   const cambio = metodoPago === 'efectivo'
-    ? Math.max(0, efectivo - totalACobrar)
+    ? r2(Math.max(0, efectivo - totalACobrar))
     : metodoPago === 'mixto'
-      ? Math.max(0, efectivoMixtoVal + tarjetaMixtoVal - totalACobrar)
+      ? r2(Math.max(0, efectivoMixtoVal + tarjetaMixtoVal - totalACobrar))
       : 0
   const engranajes = Math.max(0, Math.floor((total - montoCanjeado) / 10))
   const tieneEngranajeSuficiente = !cliente || engranajesTotalesCanje <= (cliente.engranajes ?? 0)
   const puedeConfirmar = tieneEngranajeSuficiente && (
     metodoPago === 'tarjeta' ||
-    (metodoPago === 'efectivo' && efectivo >= totalACobrar) ||
-    (metodoPago === 'mixto' && efectivoMixtoVal + tarjetaMixtoVal >= totalACobrar)
+    (metodoPago === 'efectivo' && r2(efectivo) >= totalACobrar) ||
+    (metodoPago === 'mixto' && r2(efectivoMixtoVal + tarjetaMixtoVal) >= totalACobrar)
   )
 
   async function buscarPorTelefono() {
@@ -555,16 +560,22 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
   // Mejora 1 — Imprimir recibo térmico
   async function enviarEncuesta(calificacion: number) {
     setEncuestaCalif(calificacion)
-    const { data: { user } } = await supabase.auth.getUser()
-    const { error } = await supabase.from('encuestas').insert({
-      venta_id: encuestaVentaId,
-      usuario_id: user?.id ?? null,
-      calificacion,
-      comentario: encuestaComentario.trim() || null,
-      mesa_nombre: mesaNombre,
-    })
-    if (error) { console.error('Error al enviar encuesta:', error.message); setEncuestaEnviada(false); return }
-    setEncuestaEnviada(true)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      const { error } = await supabase.from('encuestas').insert({
+        venta_id: encuestaVentaId,
+        usuario_id: user?.id ?? null,
+        calificacion,
+        comentario: encuestaComentario.trim() || null,
+        mesa_nombre: mesaNombre,
+      })
+      if (error) { console.error('Error al enviar encuesta:', error.message); setEncuestaEnviada(false); return }
+      setEncuestaEnviada(true)
+    } catch (err) {
+      // Sin conexión u otro fallo — la encuesta es opcional, no romper el flujo de éxito
+      console.warn('[checkout] No se pudo enviar la encuesta:', err)
+      setEncuestaEnviada(false)
+    }
   }
 
   async function imprimirRecibo() {
@@ -652,6 +663,9 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
 
   async function confirmarVenta() {
     if (paso !== 'pago' || procesandoRef.current) return  // guard síncrono anti-doble-pago
+    // Activar el candado ANTES de cualquier await: la revalidación del cupón
+    // tarda y dos Enter rápidos pasaban ambos el guard → doble cobro
+    procesandoRef.current = true
 
     // BUG 4: Revalidar cupón justo antes de registrar la venta
     if (cuponAplicado) {
@@ -664,16 +678,19 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       if (cuponCheckErr || !cuponActual || !cuponActual.activo) {
         setCuponAplicado(null)
         toast.error('El cupón ya no es válido — fue eliminado o desactivado')
+        procesandoRef.current = false
         return
       }
       if (cuponActual.usos_maximos != null && (cuponActual.usos_actuales ?? 0) >= cuponActual.usos_maximos) {
         setCuponAplicado(null)
         toast.error('El cupón ya se agotó')
+        procesandoRef.current = false
         return
       }
       if (cuponActual.valido_hasta && hoy > cuponActual.valido_hasta) {
         setCuponAplicado(null)
         toast.error('El cupón expiró')
+        procesandoRef.current = false
         return
       }
     }
@@ -683,13 +700,15 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       const itemsSinAsignar = cart.filter(i => !splitAsignacion[i.menu_id])
       if (itemsSinAsignar.length > 0) {
         toast.error(`${itemsSinAsignar.length} ítem(s) sin asignar a ninguna cuenta`)
+        procesandoRef.current = false
         return
       }
     }
 
-    procesandoRef.current = true
     playCashRegisterSound()
     setPaso('procesando')
+    // BUG 3 — ID de la venta si el insert llegó a BD (para no duplicarla si se encola offline)
+    let ventaIdInsertada: string | null = null
     try {
       // Mejora 2 — RFC: intentar insertar, silencioso si columna no existe
       const ventaPayload: Record<string, unknown> = {
@@ -718,6 +737,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
 
       if (ventaError || !ventaData) throw new Error(ventaError?.message || 'Error al crear venta')
       setEncuestaVentaId(ventaData.id)
+      ventaIdInsertada = ventaData.id
 
       const items = cart.map(i => ({
         venta_id: ventaData.id,
@@ -792,13 +812,15 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
         toast(`📦 Stock bajo: ${stockBajoItems.join(', ')}`, { duration: 6000, icon: '⚠️' })
       }
 
-      if (ordenId) {
+      // BUG 1 — En cobro parcial (cuenta dividida) NO cerrar la orden ni liberar mesas:
+      // el resto de los ítems sigue pendiente de cobro. Solo el cobro completo cierra.
+      if (ordenId && !esPagoParcial) {
         const { error: errOrden } = await supabase.from('ordenes').update({ estado: 'pagada', cerrada_at: new Date().toISOString() }).eq('id', ordenId)
         if (errOrden) console.warn('[checkout] Error marcando orden pagada:', errOrden.message)
         // Libera todas las mesas de la orden (incluye mesas juntadas) — siempre intentar aunque falle orden
         const { error: errMesa } = await supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('orden_id', ordenId)
         if (errMesa) console.warn('[checkout] Error liberando mesas por orden:', errMesa.message)
-      } else if (mesaId) {
+      } else if (!ordenId && mesaId && !esPagoParcial) {
         const { error: errMesa } = await supabase.from('mesas').update({ estado: 'libre', orden_id: null }).eq('id', mesaId)
         if (errMesa) console.warn('[checkout] Error liberando mesa:', errMesa.message)
       }
@@ -930,6 +952,7 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
           cajero_id:         cajero.id,
           cajero_nombre:     `${cajero.nombre} ${cajero.last_name}`,
           mesa_nombre:       mesaNombre,
+          mesa_id:           mesaId || null,
           orden_id:          ordenId,
           metodo_pago:       metodoPago as 'efectivo' | 'tarjeta' | 'mixto',
           subtotal:          total + (descuentoMonto ?? 0),
@@ -940,8 +963,13 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
           cambio:            metodoPago === 'efectivo' ? cambio : metodoPago === 'mixto' ? cambio : null,
           propina:           propinaMonto,
           engranajes_ganados: cliente ? engranajes : 0,
+          engranajes_canjeados: cliente ? engranajesTotalesCanje : 0,
           usuario_id:        cliente?.id ?? null,
           rfc_cliente:       rfcCliente.trim() || undefined,
+          // BUG 3 — si la venta ya se insertó en BD, pasar su ID para no duplicarla al sincronizar
+          venta_id_bd:       ventaIdInsertada ?? undefined,
+          // BUG 1 — cobro parcial (split): al sincronizar no cerrar orden ni liberar mesas
+          es_pago_parcial:   esPagoParcial ?? undefined,
           items:             cart.map(i => ({
             menu_id:    i.menu_id,
             producto_id: i.producto_id,
@@ -971,12 +999,15 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
     if (paso !== 'pago') return
     function onKey(e: KeyboardEvent) {
       if (showCancelConfirm || showScanner || showSearch) return
+      // BUG 2 — Con un intento MP activo en la terminal no abrir el diálogo de cancelar
+      // con Escape (el cierre sin cancelar dejaba el cobro vivo en la terminal)
+      if (mpEstado === 'creando' || mpEstado === 'esperando') return
       if (e.key === 'Escape') { e.preventDefault(); setShowCancelConfirm(true) }
       if (e.key === 'Enter' && puedeConfirmar) { e.preventDefault(); confirmarVenta() }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [paso, puedeConfirmar, showCancelConfirm, showScanner, showSearch])
+  }, [paso, puedeConfirmar, showCancelConfirm, showScanner, showSearch, mpEstado])
 
   const hoy = new Date()
   const esCumple = (() => {
@@ -1072,7 +1103,10 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
       <div
         className="fixed inset-0 z-40 flex items-center justify-center p-4"
         style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(4px)' }}
-        onClick={paso === 'pago' ? () => setShowCancelConfirm(true) : paso === 'exito' ? onCompletado : undefined}
+        onClick={paso === 'pago'
+          // BUG 2 — Con intento MP activo no permitir cerrar desde el backdrop
+          ? (mpEstado === 'creando' || mpEstado === 'esperando' ? undefined : () => setShowCancelConfirm(true))
+          : paso === 'exito' ? onCompletado : undefined}
       >
         <div
           className="w-full max-w-md animate-slide-up"
@@ -2304,7 +2338,13 @@ export default function CheckoutModal({ cart, total, descuentoMonto, mesaId, mes
                 Volver
               </button>
               <button
-                onClick={() => { setShowCancelConfirm(false); onClose() }}
+                onClick={async () => {
+                  setShowCancelConfirm(false)
+                  // BUG 2 — Si hay un intento de pago activo en la terminal MP,
+                  // cancelarlo ANTES de cerrar para que no quede un cobro vivo
+                  if (mpIntentoId) await cancelarPagoTerminal()
+                  onClose()
+                }}
                 className="flex-1 py-3 font-black text-sm uppercase tracking-wider transition-all"
                 style={{ background: '#ef4444', color: '#fff', border: '2px solid #ef4444', borderRadius: 0, cursor: 'pointer' }}
               >

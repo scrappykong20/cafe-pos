@@ -28,10 +28,11 @@ import AperturaCajaPage from './pages/AperturaCajaPage'
 import FiadosPage from './pages/FiadosPage'
 import toast from 'react-hot-toast'
 import { registrarAccion } from './services/auditLog'
-import { crearTicket, imprimirPorTipo, hayImpresora, listarImpresoras, getSlot, setSlot } from './services/printer'
+import { crearTicket, imprimirPorTipo, hayImpresora, autoDetectarImpresoras } from './services/printer'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
 import { syncOfflineQueue, getPendingCount, clearSynced } from './services/offlineQueue'
 import { logger } from './services/logger'
+import { iniciarTelegramBridge, detenerTelegramBridge } from './services/telegramBridge'
 
 export interface CajeroActivo {
   id: string
@@ -79,6 +80,12 @@ export default function App() {
       setConnected(status === 'SUBSCRIBED')
     })
     return () => { supabase.removeChannel(ch) }
+  }, [])
+
+  // Bridge de Telegram — escucha comandos remotos del dueño
+  useEffect(() => {
+    iniciarTelegramBridge()
+    return () => detenerTelegramBridge()
   }, [])
 
   // Sincronizar ventas offline cuando vuelve la conexión
@@ -247,19 +254,36 @@ export default function App() {
           if (error) {
             console.error('[POS] Error al iniciar sesión de servicio:', error.message)
             void logger.error('auth', 'Login de servicio POS falló', { error: error.message })
-            toast.error('Error de conexión con el servidor — verifica credenciales POS')
+            if (!navigator.onLine) {
+              // Sin internet — respetar el modo offline con caché local
+              toast('Sin conexión — iniciando en modo offline', { icon: '📴', duration: 6000 })
+              setSesionActiva(true)
+            } else {
+              // Fallo de autenticación real — no arrancar como si nada:
+              // sesionActiva queda false y se muestra la pantalla "Activar POS"
+              // para que un admin inicie sesión manualmente
+              toast.error('No se pudo iniciar sesión en el servidor — verifica las credenciales POS', { duration: 8000 })
+            }
           } else {
             void logger.info('auth', 'POS iniciado correctamente', { online: navigator.onLine })
+            setSesionActiva(true)
           }
         } else {
           console.warn('[POS] VITE_POS_EMAIL / VITE_POS_PASSWORD no configurados — algunas funciones pueden fallar')
           void logger.warn('auth', 'VITE_POS_EMAIL/PASSWORD no configurados')
+          setSesionActiva(true)
         }
       } catch (err) {
         console.error('[POS] Error inesperado en auth:', err)
         void logger.error('auth', 'Error inesperado al iniciar POS', { error: String(err) })
+        if (!navigator.onLine) {
+          // Error de red sin internet — respetar el modo offline
+          toast('Sin conexión — iniciando en modo offline', { icon: '📴', duration: 6000 })
+          setSesionActiva(true)
+        } else {
+          toast.error('Error inesperado al conectar con el servidor — intenta de nuevo', { duration: 8000 })
+        }
       } finally {
-        setSesionActiva(true)
         setLoading(false)
       }
     }
@@ -282,17 +306,15 @@ export default function App() {
     setActiveCajero(cajero)
     toast.success(`Bienvenido, ${cajero.nombre}`)
 
-    // Auto-detectar impresora si no hay ninguna configurada
+    // Auto-detectar impresoras térmicas si no hay ninguna configurada
     if (!hayImpresora('caja')) {
-      listarImpresoras().then(lista => {
-        const epson = lista.find(p =>
-          p.toLowerCase().includes('tm-t') ||
-          p.toLowerCase().includes('receipt') ||
-          p.toLowerCase().includes('epson')
-        )
-        if (epson && !getSlot(1).nombre && !getSlot(1).ip) {
-          setSlot(1, { tipo: 'caja', modo: 'cable', nombre: epson, ip: '' })
-          toast.success(`Impresora detectada: ${epson}`, { duration: 3000 })
+      autoDetectarImpresoras().then(det => {
+        if (det.caja)   toast.success(`Impresora caja detectada: ${det.caja}`, { duration: 4000 })
+        if (det.cocina) toast.success(`Impresora cocina detectada: ${det.cocina}`, { duration: 4000 })
+        if (!det.caja && !det.cocina) {
+          toast('No se detectó impresora térmica — configúrala en Configuración', {
+            icon: '🖨️', duration: 5000,
+          })
         }
       }).catch(() => {})
     }

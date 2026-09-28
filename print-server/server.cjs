@@ -114,25 +114,38 @@ function listarImpresoras() {
 }
 
 // Orígenes permitidos para CORS
+// 'null' = app Electron empaquetada (carga file:// → origen opaco "null")
+// https://localhost / capacitor://localhost = app Android/iOS (Capacitor)
 const ORIGENES_PERMITIDOS = [
   'http://localhost:5173',
   'http://localhost:3000',
   'http://localhost:4173',
   'app://.',
+  'null',
+  'https://localhost',
+  'capacitor://localhost',
 ]
 
 function esNombreImpresoraSeguro(nombre) {
-  return typeof nombre === 'string' && /^[\w\s\-\.\(\)áéíóúÁÉÍÓÚñÑ,]+$/.test(nombre) && nombre.length < 200
+  // Permite los caracteres comunes en nombres de impresora Windows (& + / @ # :).
+  // Se siguen excluyendo comillas (' "), punto y coma, $ y backtick para no
+  // romper la interpolación en los scripts PowerShell (imprimirRaw / clear-queue
+  // ya escapan ' → '', pero mejor no dejarlos entrar).
+  return typeof nombre === 'string' && /^[\w\s\-\.\(\)&+\/@#:áéíóúÁÉÍÓÚñÑ,]+$/.test(nombre) && nombre.length < 200
 }
 
 // Servidor HTTP
 const server = http.createServer(async (req, res) => {
-  // CORS restrictivo — solo orígenes conocidos
+  // CORS restrictivo — solo orígenes conocidos. Sin header Origin (curl,
+  // herramientas locales) se responde con el primero de la lista; el servidor
+  // solo escucha en 127.0.0.1, así que el riesgo es mínimo.
   const origin = req.headers.origin || ''
   const origenPermitido = ORIGENES_PERMITIDOS.includes(origin) ? origin : ORIGENES_PERMITIDOS[0]
   res.setHeader('Access-Control-Allow-Origin', origenPermitido)
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  // Chrome exige este header en preflights Private Network Access (https → 127.0.0.1)
+  res.setHeader('Access-Control-Allow-Private-Network', 'true')
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
@@ -140,6 +153,56 @@ const server = http.createServer(async (req, res) => {
     const printers = listarImpresoras()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(printers))
+    return
+  }
+
+  // ── Re-instalar/detectar impresoras USB conectadas después de la instalación
+  // Ejecuta setup-hardware.ps1 (empaquetado junto al print-server en resources/app).
+  // Sin permisos de admin solo actualiza Spooler y loguea; la instalación de la
+  // cola requiere elevación (ya se hizo en el instalador del EXE).
+  if (req.method === 'POST' && req.url === '/setup-printers') {
+    try {
+      // Empaquetado: resources/app/setup-hardware.ps1 · Desarrollo: cafe-pos/electron/
+      const script = [
+        path.join(__dirname, '..', 'setup-hardware.ps1'),
+        path.join(__dirname, '..', 'electron', 'setup-hardware.ps1'),
+      ].find(p => fs.existsSync(p))
+      if (script) {
+        execFileSync('powershell', [
+          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+          '-File', script
+        ], { timeout: 45000 })
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, printers: listarImpresoras() }))
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: e.message, printers: listarImpresoras() }))
+    }
+    return
+  }
+
+  // ── Limpiar cola de impresión (fallback para navegador/Android; en Electron
+  // se usa el IPC 'limpiar-cola-impresion'). Sin permisos de admin no borra
+  // trabajos ajenos, pero no rompe nada.
+  if (req.method === 'POST' && req.url === '/clear-queue') {
+    let body = ''
+    req.on('data', c => { body += c })
+    req.on('end', () => {
+      let printer = ''
+      try { printer = String(JSON.parse(body || '{}').printer || '') } catch {}
+      const ps = printer && esNombreImpresoraSeguro(printer)
+        ? `Get-PrintJob -PrinterName '${printer.replace(/'/g, "''")}' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue; "ok"`
+        : `Get-Printer | ForEach-Object { Get-PrintJob -PrinterName $_.Name -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue }; "ok"`
+      try {
+        const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 15000 }).toString()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: out.includes('ok') }))
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: e.message }))
+      }
+    })
     return
   }
 
@@ -213,6 +276,30 @@ const server = http.createServer(async (req, res) => {
     })
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ok }))
+    return
+  }
+
+  // ── Diagnóstico: impresoras instaladas + estado de la configurada ─────────
+  if (req.method === 'GET' && req.url.startsWith('/diagnostico')) {
+    try {
+      const u = new URL(req.url, 'http://localhost')
+      const nombreConfigurado = u.searchParams.get('printer') || ''
+      const instaladas = listarImpresoras()
+      const existe = instaladas.some(p => p === nombreConfigurado)
+      // Verificar si la impresora tiene trabajos pendientes / estado
+      let estadoPS = ''
+      try {
+        estadoPS = require('child_process').execFileSync('powershell', [
+          '-NoProfile', '-Command',
+          `Get-Printer | Select-Object Name,PrinterStatus,JobCount | ConvertTo-Json`
+        ], { timeout: 5000 }).toString().trim()
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ instaladas, nombreConfigurado, existe, estadoPS }))
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: e.message }))
+    }
     return
   }
 

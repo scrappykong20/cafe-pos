@@ -24,6 +24,15 @@
     "SOFTWARE\CafeDelConstructor\POS" \
     "Version" \
     "2.5.0"
+
+  ; ── Configurar hardware: impresora térmica + servicio de impresión ───────
+  ; Ejecuta setup-hardware.ps1 (ya copiado a resources\app por extraResources).
+  ; El instalador perMachine corre elevado, así que puede instalar el driver
+  ; "Generic / Text Only" y dar de alta impresoras USB conectadas sin cola.
+  ; El lector QR es HID (plug-and-play): no requiere instalación.
+  ; El resultado queda en %ProgramData%\CafePOS\setup-hardware.log
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$INSTDIR\resources\app\setup-hardware.ps1"'
+  Pop $0 ; código de salida (solo informativo, nunca bloquea la instalación)
 !macroend
 
 !macro customUnInstall

@@ -7,6 +7,10 @@ const { ipcRenderer } = require('electron')
 window.electronAPI = {
   // Cierra la aplicación si la clave es correcta; retorna true/false
   cerrarApp: (clave) => ipcRenderer.invoke('cerrar-app', clave),
+  // Limpia la cola de impresión de una impresora atascada
+  limpiarColaImpresion: (nombreImpresora) => ipcRenderer.invoke('limpiar-cola-impresion', nombreImpresora),
+  // Reinicia el proceso del servidor de impresión
+  reiniciarPrintServer: () => ipcRenderer.invoke('reiniciar-print-server'),
 }
 
 

@@ -16,11 +16,76 @@ export default function QRScannerModal({ onScan, onClose }: Props) {
   const [usarCamara, setUsarCamara]     = useState(false)
   const [camaraActiva, setCamaraActiva] = useState(false)
 
+  // Ref de onScan para no re-registrar listeners en cada re-render del padre
+  // (los padres pasan onScan inline — con la prop directa el listener se
+  // re-registraría y el buffer del scanner se reiniciaría a la mitad de un escaneo)
+  const onScanRef = useRef(onScan)
+  useEffect(() => { onScanRef.current = onScan })
+
   // ── Foco automático al abrir (el lector USB escribe aquí directamente) ──────
   useEffect(() => {
-    const id = setTimeout(() => inputRef.current?.focus(), 80)
-    return () => clearTimeout(id)
+    // Intentar foco varias veces para asegurar que la animación del modal terminó
+    const t1 = setTimeout(() => inputRef.current?.focus(), 100)
+    const t2 = setTimeout(() => inputRef.current?.focus(), 300)
+    const t3 = setTimeout(() => inputRef.current?.focus(), 600)
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3) }
   }, [])
+
+  // ── Capturar ráfagas rápidas del lector USB cuando el input no tiene foco ─────
+  // Los lectores USB (HID) envían chars a <30ms de separación.
+  // Solo interceptamos esas ráfagas — la escritura humana (>80ms) nunca se toca.
+  useEffect(() => {
+    if (usarCamara) return
+    let buffer = ''
+    let lastKeyTime = 0
+
+    function handleWindowKey(e: KeyboardEvent) {
+      if (document.activeElement === inputRef.current) return
+      if (e.ctrlKey || e.altKey || e.metaKey) return
+      if (e.key.length > 1 && e.key !== 'Enter') return
+
+      const now = Date.now()
+      const gap = now - lastKeyTime
+      lastKeyTime = now
+
+      // ¿Es una ráfaga de scanner? (chars llegando < 50ms entre sí)
+      const esBurst = gap < 50 && buffer.length > 0
+
+      if (e.key === 'Enter') {
+        if (buffer.trim()) {
+          e.preventDefault()
+          e.stopPropagation()
+          const val = buffer.trim()
+          buffer = ''
+          setManualToken('')
+          onScanRef.current(val)
+        }
+        return
+      }
+
+      if (esBurst) {
+        // Mismo burst → acumular silencioso sin dejar pasar el evento
+        e.preventDefault()
+        e.stopPropagation()
+        buffer += e.key
+      } else {
+        // Primer char de posible burst — interceptarlo también: si lo dejamos
+        // pasar con el input sin foco, el char se pierde (token truncado) o
+        // termina insertado en un campo del modal de atrás (ej. efectivo)
+        e.preventDefault()
+        e.stopPropagation()
+        buffer = e.key
+        // Devolver el foco al input y reflejar el char ahí: si la ráfaga
+        // continúa con el input ya enfocado, el resto entra solo al input
+        // y el Enter final lo envía completo por handleKeyDown
+        setManualToken(prev => prev + e.key)
+        inputRef.current?.focus()
+      }
+    }
+
+    window.addEventListener('keydown', handleWindowKey, true)
+    return () => window.removeEventListener('keydown', handleWindowKey, true)
+  }, [usarCamara])
 
   // ── Captura la tecla Enter del lector USB ────────────────────────────────────
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -39,35 +104,45 @@ export default function QRScannerModal({ onScan, onClose }: Props) {
       return
     }
 
+    // Flag de cancelación: si el modal se desmonta con las promesas pendientes,
+    // el stream puede arrancar después y nadie lo detendría (LED de cámara encendido)
+    let cancelled = false
     const codeReader = new BrowserQRCodeReader()
     navigator.mediaDevices
       .getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
       .then(stream => {
         stream.getTracks().forEach(t => t.stop())
+        if (cancelled) return
         codeReader
           .decodeFromConstraints(
             { video: { facingMode: { ideal: 'environment' } } },
             videoRef.current!,
             (result, _err, controls) => {
+              if (cancelled) { controls.stop(); return }
               controlsRef.current = controls
               if (result) {
                 controls.stop()
-                onScan(result.getText())
+                onScanRef.current(result.getText())
               }
             },
           )
-          .then(() => setCamaraActiva(true))
+          .then(() => { if (!cancelled) setCamaraActiva(true) })
           .catch(() => {
+            if (cancelled) return
             setCamaraError('No se pudo iniciar la cámara.')
             setUsarCamara(false)
           })
       })
       .catch(() => {
+        if (cancelled) return
         setCamaraError('Permiso de cámara denegado.')
         setUsarCamara(false)
       })
 
-    return () => { controlsRef.current?.stop() }
+    return () => {
+      cancelled = true
+      controlsRef.current?.stop()
+    }
   }, [usarCamara])
 
   function handleManual(e: React.FormEvent) {

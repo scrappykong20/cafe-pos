@@ -33,6 +33,16 @@ async function log(nivel: Nivel, modulo: string, mensaje: string, detalle?: Reco
   } catch {
     // Si falla el log, no romper nada
   }
+
+  // Recuperación automática con IA — solo para errores, importación dinámica
+  // para evitar dependencia circular y no bloquear el flujo principal
+  if (nivel === 'error' && modulo !== 'ai-recovery') {
+    import('./aiErrorRecovery').then(({ recuperarError }) => {
+      void recuperarError(modulo, mensaje, detalle)
+    }).catch(() => {
+      // Si el módulo de recuperación no está disponible, ignorar
+    })
+  }
 }
 
 export const logger = {

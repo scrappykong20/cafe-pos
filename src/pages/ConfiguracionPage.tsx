@@ -4,7 +4,7 @@ import toast from 'react-hot-toast'
 import type { CajeroActivo } from '../App'
 import {
   getSlot, setSlot, type PrinterSlot, hayImpresora,
-  imprimirPorTipo, pingImpresora,
+  imprimirSlot, pingImpresora, esTérmica,
   listarImpresoras, buildComandaHTML, buildReciboHTML,
 } from '../services/printer'
 
@@ -129,12 +129,12 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
     try {
       const lista = await listarImpresoras()
       setImpresoras(lista)
-      // Auto-asignar primera Epson al slot vacío si no hay ninguno configurado
+      // Auto-asignar primera térmica al slot vacío si no hay ninguno configurado
       if (!hayImpresora('caja') && lista.length > 0) {
-        const epson = lista.find(p => p.toLowerCase().includes('tm-t') || p.toLowerCase().includes('receipt'))
-        if (epson) {
+        const termica = lista.find(esTérmica)
+        if (termica) {
           const s1 = getSlot(1)
-          if (!s1.nombre && !s1.ip) updateSlot(1, { tipo: 'caja', modo: 'cable', nombre: epson })
+          if (!s1.nombre && !s1.ip) updateSlot(1, { tipo: 'caja', modo: 'cable', nombre: termica })
         }
       }
     } catch {
@@ -179,13 +179,15 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
         items: [{ emoji: '☕', nombre: 'Capuccino', cantidad: 1, notas: 'Sin azúcar' }],
       })
     }
-    const ok = await imprimirPorTipo(tipo, html)
+    const ok = await imprimirSlot(n, html)
     setSlotFeedback(prev => ({ ...prev, [n]: ok ? 'ok' : 'error' }))
     setTimeout(() => setSlotFeedback(prev => ({ ...prev, [n]: null })), 3000)
   }
 
   useEffect(() => {
     loadConfig()
+    detectarImpresoras()  // llenar el selector de impresoras al entrar
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function loadConfig() {
@@ -320,7 +322,8 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--dark)', padding: '1.5rem' }}>
+    <div style={{ height: '100vh', overflow: 'hidden', background: 'var(--dark)', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem' }}>
       <div style={{ maxWidth: 640, margin: '0 auto' }}>
         {/* Header */}
         <div
@@ -436,25 +439,18 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
             Configura hasta 2 impresoras. Elige si es de caja o cocina, y si se conecta por cable USB o por red (IP).
           </p>
 
-          {/* Detectar impresoras USB */}
+          {/* Actualizar lista de impresoras instaladas */}
           <button
             onClick={detectarImpresoras}
             disabled={detectando}
             style={{ width:'100%', padding:'0.55rem', background:'var(--dark)', color:'var(--muted)', border:'1px solid var(--border)', borderRadius:0, fontWeight:900, fontSize:'0.7rem', letterSpacing:'0.15em', textTransform:'uppercase', cursor:'pointer', marginBottom:'0.85rem' }}
           >
-            {detectando ? 'Detectando...' : '🔍 Detectar impresoras USB / local'}
+            {detectando ? 'Detectando...' : '🔄 Actualizar lista de impresoras'}
           </button>
 
-          {impresoras.length > 0 && (
-            <div style={{ padding:'0.6rem 0.75rem', background:'rgba(34,197,94,0.06)', border:'1px solid #22c55e33', borderRadius:0, marginBottom:'1rem' }}>
-              <div style={{ color:'#22c55e', fontSize:'0.65rem', fontWeight:900, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:'0.5rem' }}>Impresoras detectadas:</div>
-              {impresoras.map(p => (
-                <div key={p} style={{ display:'flex', gap:'0.4rem', marginBottom:'0.35rem', alignItems:'center' }}>
-                  <button onClick={() => updateSlot(1, { nombre: p, modo: 'cable' })} style={{ padding:'0.25rem 0.5rem', background:'var(--dark)', color:'var(--muted)', border:'1px solid var(--border)', fontSize:'0.6rem', fontWeight:900, cursor:'pointer', textTransform:'uppercase', letterSpacing:'0.1em', whiteSpace:'nowrap' }}>→ Slot 1</button>
-                  <button onClick={() => updateSlot(2, { nombre: p, modo: 'cable' })} style={{ padding:'0.25rem 0.5rem', background:'var(--dark)', color:'var(--muted)', border:'1px solid var(--border)', fontSize:'0.6rem', fontWeight:900, cursor:'pointer', textTransform:'uppercase', letterSpacing:'0.1em', whiteSpace:'nowrap' }}>→ Slot 2</button>
-                  <span style={{ flex:1, color:'var(--text)', fontSize:'0.7rem', fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p}</span>
-                </div>
-              ))}
+          {impresoras.length === 0 && !detectando && (
+            <div style={{ padding:'0.6rem 0.75rem', background:'rgba(239,68,68,0.06)', border:'1px solid #ef444433', borderRadius:0, marginBottom:'1rem', color:'#ef4444', fontSize:'0.65rem', fontWeight:700 }}>
+              No se detectaron impresoras instaladas en Windows. Conecta la impresora por USB y pulsa "Actualizar lista".
             </div>
           )}
 
@@ -519,13 +515,17 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
                 {/* Campo según modo */}
                 {slot.modo === 'cable' ? (
                   <div style={{ marginBottom:'0.65rem' }}>
-                    <label style={labelStyle}>Nombre de impresora (Windows)</label>
-                    <input
+                    <label style={labelStyle}>Impresora (Windows)</label>
+                    <select
                       value={slot.nombre}
                       onChange={e => updateSlot(n, { nombre: e.target.value })}
-                      placeholder="Ej: EPSON TM-T20IV Receipt6"
-                      style={inputBase}
-                    />
+                      style={{ ...inputBase, cursor:'pointer' }}
+                    >
+                      <option value="" style={{ background:'#1a1a1a', color:'#fff' }}>— Selecciona una impresora —</option>
+                      {(slot.nombre && !impresoras.includes(slot.nombre) ? [slot.nombre, ...impresoras] : impresoras).map(p => (
+                        <option key={p} value={p} style={{ background:'#1a1a1a', color:'#fff' }}>{p}</option>
+                      ))}
+                    </select>
                   </div>
                 ) : (
                   <div style={{ marginBottom:'0.65rem' }}>
@@ -1026,6 +1026,7 @@ export default function ConfiguracionPage({ cajero, onVolver }: Props) {
           </div>
         )}
 
+      </div>
       </div>
     </div>
   )

@@ -24,9 +24,13 @@ const BASE = app.isPackaged
 
 let printServerProcess = null
 let mainWindow = null
+let printServerEnabled = true   // se pone false al salir de la app
+let printServerRetries  = 0
+const PRINT_SERVER_MAX_RETRIES = 10
 
 // ── Matar servidor de impresión sin doble-kill ───────────────────────────────
 function killPrintServer () {
+  printServerEnabled = false
   if (!printServerProcess) return
   try { printServerProcess.kill() } catch (_) {}
   printServerProcess = null
@@ -34,6 +38,8 @@ function killPrintServer () {
 
 // ── Servidor de impresión en segundo plano ───────────────────────────────────
 function startPrintServer () {
+  if (!printServerEnabled) return
+
   const serverPath = path.join(BASE, 'print-server', 'server.cjs')
   if (!fs.existsSync(serverPath)) {
     console.warn('[print-server] No encontrado en:', serverPath)
@@ -49,9 +55,16 @@ function startPrintServer () {
     detached: false,
   })
 
+  // Si el proceso arranca, reseteamos reintentos
+  printServerProcess.on('spawn', () => {
+    printServerRetries = 0
+    console.log('[print-server] Iniciado correctamente')
+  })
+
   printServerProcess.on('error', (err) => {
     console.error('[print-server] Error al iniciar:', err.message)
     printServerProcess = null
+    scheduleRestart()
   })
 
   printServerProcess.on('exit', (code) => {
@@ -59,6 +72,46 @@ function startPrintServer () {
       console.warn('[print-server] Proceso terminó con código:', code)
     }
     printServerProcess = null
+    scheduleRestart()
+  })
+}
+
+function scheduleRestart () {
+  if (!printServerEnabled) return
+  if (printServerRetries >= PRINT_SERVER_MAX_RETRIES) {
+    console.error('[print-server] Máximo de reintentos alcanzado — no se reiniciará')
+    return
+  }
+  // Backoff: 2s, 4s, 8s... hasta 30s
+  const delay = Math.min(2000 * Math.pow(2, printServerRetries), 30000)
+  printServerRetries++
+  console.log(`[print-server] Reiniciando en ${delay / 1000}s (intento ${printServerRetries})...`)
+  setTimeout(() => {
+    if (printServerEnabled) {
+      startPrintServer()
+    }
+  }, delay)
+}
+
+// ── Limpiar cola de impresión atascada ───────────────────────────────────────
+function limpiarColaImpresion (nombreImpresora) {
+  return new Promise((resolve) => {
+    // Escapar comillas simples para PowerShell (' → '') — un nombre con '
+    // rompería la interpolación del comando
+    const nombre = nombreImpresora ? String(nombreImpresora).replace(/'/g, "''") : null
+    // $Error.Count reporta el resultado real — antes el "ok" era incondicional
+    // y los errores quedaban ocultos por -ErrorAction SilentlyContinue
+    const ps = nombre
+      ? `$p = Get-Printer -Name '${nombre}' -ErrorAction SilentlyContinue; if ($p) { $p | Set-Printer -WorkOffline:$false -ErrorAction SilentlyContinue }; Get-PrintJob -PrinterName '${nombre}' -ErrorAction SilentlyContinue | Remove-PrintJob -ErrorAction SilentlyContinue; if ($Error.Count -gt 0) { "fail" } else { "ok" }`
+      : `Restart-Service -Name Spooler -Force -ErrorAction SilentlyContinue; if ($Error.Count -gt 0) { "fail" } else { "ok" }`
+
+    const proc = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    let out = ''
+    proc.stdout.on('data', d => { out += d.toString() })
+    proc.on('close', () => resolve(out.includes('ok')))
+    proc.on('error', () => resolve(false))
   })
 }
 
@@ -147,6 +200,40 @@ ipcMain.handle('cerrar-app', (_event, clave) => {
     return true
   }
   return false
+})
+
+// ── IPC: limpiar cola de impresión ───────────────────────────────────────────
+ipcMain.handle('limpiar-cola-impresion', async (_event, nombreImpresora) => {
+  const ok = await limpiarColaImpresion(nombreImpresora)
+  return ok
+})
+
+// ── IPC: reiniciar servidor de impresión ─────────────────────────────────────
+ipcMain.handle('reiniciar-print-server', () => {
+  const viejo = printServerProcess
+  printServerRetries = 0
+  if (!viejo) {
+    printServerEnabled = true
+    startPrintServer()
+    return true
+  }
+  // kill() es asíncrono — arrancar el nuevo proceso solo después del 'exit'
+  // del viejo; si el viejo aún tiene el puerto 3002, el nuevo muere con EADDRINUSE
+  printServerEnabled = false   // evita que el handler 'exit' programe un reinicio aparte
+  printServerProcess = null
+  let arrancado = false
+  const arrancar = () => {
+    if (arrancado) return
+    arrancado = true
+    printServerEnabled = true
+    startPrintServer()
+  }
+  viejo.once('exit', arrancar)
+  // Timeout de seguridad por si el 'exit' no llega (el backoff de scheduleRestart
+  // cubriría el EADDRINUSE resultante)
+  setTimeout(arrancar, 3000)
+  try { viejo.kill() } catch (_) { arrancar() }
+  return true
 })
 
 // ── Ciclo de vida ────────────────────────────────────────────────────────────

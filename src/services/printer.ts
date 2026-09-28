@@ -1,11 +1,8 @@
 /* ------------------------------------------------------------------ */
-/*  printer.ts — ESC/POS raw printing via QZ Tray                      */
-/*  Requires QZ Tray running on the machine (qz.io)                    */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/*  Servidor local de impresión: http://127.0.0.1:3002                 */
-/*  Inicia con: node print-server/server.js                            */
+/*  printer.ts — Impresión ESC/POS en bruto                            */
+/*  Construye bytes ESC/POS y los envía al servidor local de impresión */
+/*  (print-server/server.cjs en http://127.0.0.1:3002), que imprime    */
+/*  en RAW por winspool.drv (USB/local) o por TCP puerto 9100 (red)    */
 /* ------------------------------------------------------------------ */
 import { LOGO_ESCPOS } from './logo-escpos'
 import { logger } from './logger'
@@ -138,9 +135,18 @@ export async function imprimirHTML(printerName: string, data: string): Promise<b
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ printer: printerName, data }),
     })
-    const json = await res.json() as { ok: boolean; error?: string }
+    const json = await res.json() as { ok: boolean; error?: string; stderr?: string }
     if (!json.ok) {
       void logger.warn('impresora', `Impresión falló en "${printerName}"`, { respuesta: json })
+    } else {
+      // Log con diagnóstico para saber si la impresora realmente existe en Windows
+      diagnosticoImpresora(printerName).then(diag => {
+        void logger.info('impresora', `Servidor OK para "${printerName}" — diagnóstico`, {
+          existe_en_windows: (diag as any).existe,
+          instaladas: (diag as any).instaladas,
+          estadoPS: (diag as any).estadoPS,
+        })
+      })
     }
     return json.ok === true
   } catch (err) {
@@ -577,7 +583,7 @@ export function hayImpresora(tipo: 'caja' | 'cocina'): boolean {
 }
 
 /** Envía ESC/POS por TCP al print server (impresora de red). */
-async function imprimirTCP(ip: string, data: string, puerto = 9100): Promise<boolean> {
+export async function imprimirTCP(ip: string, data: string, puerto = 9100): Promise<boolean> {
   try {
     const res = await fetch(`${PRINT_SERVER}/print`, {
       method: 'POST',
@@ -607,15 +613,152 @@ export async function pingImpresora(ip: string, puerto = 9100): Promise<boolean>
  * Imprime ESC/POS en la impresora configurada para el tipo dado (caja / cocina).
  * Detecta automáticamente si es cable (Windows RAW) o red (TCP 9100).
  */
+export async function diagnosticoImpresora(nombreConfigurado: string): Promise<Record<string, unknown>> {
+  try {
+    const res = await fetch(`${PRINT_SERVER}/diagnostico?printer=${encodeURIComponent(nombreConfigurado)}`)
+    return await res.json() as Record<string, unknown>
+  } catch (err) {
+    return { error: String(err) }
+  }
+}
+
 export async function imprimirPorTipo(tipo: 'caja' | 'cocina', data: string): Promise<boolean> {
   const slot = [getSlot(1), getSlot(2)].find(s => s.tipo === tipo)
   if (!slot) return false
+  // Log qué impresora se va a usar
+  void logger.info('impresora', `Intentando imprimir en slot ${tipo}`, { modo: slot.modo, nombre: slot.nombre, ip: slot.ip })
   if (slot.modo === 'red') {
     if (!slot.ip) return false
     return imprimirTCP(slot.ip, data)
   }
   if (!slot.nombre) return false
   return imprimirHTML(slot.nombre, data)
+}
+
+/** Imprime en un slot específico (botón "Imprimir prueba" de Configuración). */
+export async function imprimirSlot(n: 1 | 2, data: string): Promise<boolean> {
+  const slot = getSlot(n)
+  if (slot.modo === 'red') {
+    if (!slot.ip) return false
+    return imprimirTCP(slot.ip, data)
+  }
+  if (!slot.nombre) return false
+  return imprimirHTML(slot.nombre, data)
+}
+
+// ─── Auto-detección de impresoras térmicas ────────────────────────────────────
+
+/** Palabras clave de marcas/modelos de impresoras térmicas POS */
+const THERMAL_KEYWORDS = [
+  'epson', 'tm-t', 'tmt', 'tm_t',
+  'bixolon', 'srp-',
+  'star', 'tsp', 'mcp',
+  'xp-', 'xprinter',
+  'pos-', 'pos58', 'pos80',
+  'rongta', 'rp-',
+  'sewoo',
+  'citizen', 'ct-',
+  'receipt', 'thermal', 'termica', 'térmica',
+]
+
+export function esTérmica(nombre: string): boolean {
+  const lower = nombre.toLowerCase()
+  return THERMAL_KEYWORDS.some(kw => lower.includes(kw))
+}
+
+export interface AutoDetectResult {
+  caja?: string   // nombre Windows asignado a slot caja
+  cocina?: string // nombre Windows asignado a slot cocina
+}
+
+/** Limpia la cola de trabajos atascados de una impresora vía IPC de Electron */
+export async function limpiarColaImpresion(nombreImpresora?: string): Promise<boolean> {
+  try {
+    const api = (window as unknown as { electronAPI?: { limpiarColaImpresion?: (n?: string) => Promise<boolean> } }).electronAPI
+    if (api?.limpiarColaImpresion) {
+      return await api.limpiarColaImpresion(nombreImpresora)
+    }
+    // Fallback: pedir al print server que limpie via su endpoint
+    const res = await fetch(`${PRINT_SERVER}/clear-queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ printer: nombreImpresora ?? '' }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** Reinicia el proceso del servidor de impresión vía IPC de Electron */
+export async function reiniciarPrintServer(): Promise<boolean> {
+  try {
+    const api = (window as unknown as { electronAPI?: { reiniciarPrintServer?: () => Promise<boolean> } }).electronAPI
+    if (api?.reiniciarPrintServer) {
+      return await api.reiniciarPrintServer()
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Detecta automáticamente impresoras térmicas instaladas en Windows y las
+ * asigna a los slots vacíos (caja primero, cocina si hay segunda).
+ *
+ * Solo asigna un slot si está completamente vacío (sin nombre ni IP).
+ * Retorna los nombres de impresoras asignados, o undefined si no se asignó.
+ */
+export async function autoDetectarImpresoras(): Promise<AutoDetectResult> {
+  const result: AutoDetectResult = {}
+  try {
+    let lista = await listarImpresoras()
+    let termicas = lista.filter(esTérmica)
+
+    // Si no hay ninguna térmica, pedir al print server que intente instalar
+    // automáticamente las impresoras USB conectadas (setup-hardware.ps1) y re-escanear
+    if (termicas.length === 0) {
+      try {
+        const res = await fetch(`${PRINT_SERVER}/setup-printers`, { method: 'POST' })
+        if (res.ok) {
+          lista = await listarImpresoras()
+          termicas = lista.filter(esTérmica)
+        }
+      } catch {
+        // Print server sin el endpoint (versión vieja) — continuar normal
+      }
+    }
+
+    if (termicas.length === 0) return result
+
+    const slot1 = getSlot(1)
+    const slot2 = getSlot(2)
+    const slot1Vacio = !slot1.nombre && !slot1.ip
+    const slot2Vacio = !slot2.nombre && !slot2.ip
+
+    // No asignar una impresora que ya ocupa el otro slot (evita que caja y
+    // cocina terminen imprimiendo por la misma impresora duplicando tickets)
+    const ocupadas = new Set([slot1.nombre, slot2.nombre].filter(Boolean))
+    const disponibles = termicas.filter(t => !ocupadas.has(t))
+
+    if (slot1Vacio && disponibles[0]) {
+      setSlot(1, { tipo: 'caja', modo: 'cable', nombre: disponibles[0], ip: '' })
+      result.caja = disponibles[0]
+      ocupadas.add(disponibles[0])
+    }
+
+    if (slot2Vacio) {
+      const libre = disponibles.find(t => !ocupadas.has(t))
+      if (libre) {
+        setSlot(2, { tipo: 'cocina', modo: 'cable', nombre: libre, ip: '' })
+        result.cocina = libre
+      }
+    }
+  } catch {
+    // Si falla la detección, no interrumpir el flujo de login
+  }
+  return result
 }
 
 // ─── Comanda de cocina (ESC/POS) ──────────────────────────────────────────────

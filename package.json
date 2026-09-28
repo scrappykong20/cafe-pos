@@ -17,6 +17,7 @@
     "make-installer": "npm run build && npx pkg installer/setup.js --targets node18-win-x64 --output installer/output/CafePOS-Setup.exe --config pkg.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "@capacitor/android": "^8.4.1",
     "@capacitor/cli": "^8.4.1",
     "@capacitor/core": "^8.4.1",
